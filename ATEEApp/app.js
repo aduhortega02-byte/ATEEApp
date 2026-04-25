@@ -1,0 +1,4 @@
+{
+  "name": "ATEEApp",
+  "displayName": "ATEEApp"
+}
