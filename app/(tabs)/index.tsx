@@ -1,4 +1,5 @@
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import {
@@ -34,8 +35,9 @@ import {
   acceptRide,
   cancelRide,
   chooseDriver,
-  completeRide,
+  completeRideWithPayment,
   createRide,
+  PaymentMethod,
   Ride,
   RideBid,
   setDriverOnline,
@@ -52,6 +54,11 @@ import { useRideBids } from '../../hooks/useRideBids';
 import { useRideStatus } from '../../hooks/useRideStatus';
 import { uploadDocument, type DocumentType, type DriverDocument } from '../../lib/kycDocs';
 import { startLocationStream, stopLocationStream } from '../../lib/locationStream';
+import { fetchRecentRidesForPassenger, fetchDriverRides } from '../../lib/passenger';
+import type { Ride as RideType } from '../../lib/types';
+import { sendTextMessage, sendLocationMessage, sendQuickReply, type ChatMessage } from '../../lib/chat';
+import { useChatMessages } from '../../hooks/useChatMessages';
+import { useUnreadChatCount } from '../../hooks/useUnreadChatCount';
 import { Session } from '@supabase/supabase-js';
 import AuthScreen from '../auth';
 
@@ -86,7 +93,9 @@ type ScreenName =
   | 'DriverEarnings'
   | 'Auth'
   | 'Profile'
-  | 'DriverVerification';
+  | 'DriverVerification'
+  | 'Trips'
+  | 'Chat';
 
 type NavProp = { navigate: (s: ScreenName) => void };
 
@@ -195,11 +204,13 @@ function TopBar({
   onBack,
   onRight,
   rightLabel,
+  rightElement,
 }: {
   title: string;
   onBack?: () => void;
   onRight?: () => void;
   rightLabel?: string;
+  rightElement?: React.ReactNode;
 }) {
   return (
     <View style={s.topBar}>
@@ -211,7 +222,9 @@ function TopBar({
         <View style={{ width: 60 }} />
       )}
       <Text style={s.logo}>{title}</Text>
-      {onRight && rightLabel ? (
+      {rightElement ? (
+        <View style={{ width: 60, alignItems: 'flex-end' }}>{rightElement}</View>
+      ) : onRight && rightLabel ? (
         <TouchableOpacity onPress={onRight}>
           <Text style={s.switchRoleText}>{rightLabel}</Text>
         </TouchableOpacity>
@@ -223,6 +236,16 @@ function TopBar({
 }
 
 // ─── BOTTOM NAV ───────────────────────────────────────────────
+type IoniconsName = React.ComponentProps<typeof Ionicons>['name'];
+
+const NAV_ICONS: Record<string, { outline: IoniconsName; filled: IoniconsName }> = {
+  Home:     { outline: 'home-outline',         filled: 'home' },
+  Search:   { outline: 'search-outline',       filled: 'search' },
+  Trips:    { outline: 'car-outline',          filled: 'car' },
+  Earnings: { outline: 'wallet-outline',       filled: 'wallet' },
+  Profile:  { outline: 'person-outline',       filled: 'person' },
+};
+
 function BottomNav({
   active,
   navigate,
@@ -240,31 +263,39 @@ function BottomNav({
     mode === 'driver'
       ? {
           Home: 'DriverHome',
-          Trips: selectedRide != null ? 'DriverActive' : 'DriverHome',
+          Trips: 'Trips',
           Earnings: 'DriverEarnings',
           Profile: 'Profile',
         }
       : {
           Home: 'Home',
           Search: 'Book',
-          Trips: rideId != null ? 'Confirmed' : 'Home',
+          Trips: 'Trips',
           Profile: 'Profile',
         };
   return (
     <View style={s.bottomNav}>
-      {tabs.map((tab) => (
-        <TouchableOpacity
-          key={tab}
-          style={s.navItem}
-          onPress={() => {
-            haptic.select();
-            navigate(routes[tab]);
-          }}
-        >
-          <View style={[s.navDot, active === tab && s.navDotActive]} />
-          <Text style={[s.navLabel, active === tab && { color: RED }]}>{tab}</Text>
-        </TouchableOpacity>
-      ))}
+      {tabs.map((tab) => {
+        const isActive = active === tab;
+        const icons = NAV_ICONS[tab];
+        return (
+          <TouchableOpacity
+            key={tab}
+            style={s.navItem}
+            onPress={() => {
+              haptic.select();
+              navigate(routes[tab]);
+            }}
+          >
+            <Ionicons
+              name={isActive ? icons.filled : icons.outline}
+              size={24}
+              color={isActive ? RED : '#aaa'}
+            />
+            <Text style={[s.navLabel, isActive && { color: RED, fontWeight: '600' }]}>{tab}</Text>
+          </TouchableOpacity>
+        );
+      })}
     </View>
   );
 }
@@ -388,6 +419,7 @@ function HomeScreen({ navigate }: NavProp) {
 function BookScreen({ navigate }: NavProp) {
   const { setRideId } = useContext(RideContext);
   const [price, setPrice] = useState(40);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [destination, setDestination] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -483,6 +515,7 @@ function BookScreen({ navigate }: NavProp) {
         offered_price: price,
         distance_mi: routeInfo.distance_mi,
         eta_min: routeInfo.eta_min,
+        payment_method: paymentMethod,
       });
       setRideId(ride.id);
       navigate('Matching');
@@ -598,6 +631,20 @@ function BookScreen({ navigate }: NavProp) {
               </TouchableOpacity>
             </View>
 
+            <View style={[s.tabRow, { marginTop: 14 }]}>
+              {(['cash', 'etransfer'] as PaymentMethod[]).map((m) => (
+                <TouchableOpacity
+                  key={m}
+                  style={[s.payMethodBtn, paymentMethod === m && s.payMethodBtnActive]}
+                  onPress={() => { haptic.select(); setPaymentMethod(m); }}
+                >
+                  <Text style={[s.payMethodText, paymentMethod === m && s.payMethodTextActive]}>
+                    {m === 'cash' ? '💵 Cash' : '📱 E-transfer'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
             <TouchableOpacity
               style={[s.redBtn, { backgroundColor: 'white', marginTop: 14, opacity: submitDisabled ? 0.4 : 1 }]}
               onPress={submitRequest}
@@ -695,6 +742,7 @@ function MatchingScreen({ navigate }: NavProp) {
 function ScheduleScreen({ navigate }: NavProp) {
   const { setRideId } = useContext(RideContext);
   const [price, setPrice] = useState(40);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [selectedTime, setSelectedTime] = useState(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -794,6 +842,7 @@ function ScheduleScreen({ navigate }: NavProp) {
         distance_mi: routeInfo.distance_mi,
         eta_min: routeInfo.eta_min,
         scheduled_for: when.toISOString(),
+        payment_method: paymentMethod,
       });
       setRideId(ride.id);
       navigate('Matching');
@@ -901,6 +950,20 @@ function ScheduleScreen({ navigate }: NavProp) {
               >
                 <Text style={s.priceBtnText}>+</Text>
               </TouchableOpacity>
+            </View>
+
+            <View style={[s.tabRow, { marginTop: 14 }]}>
+              {(['cash', 'etransfer'] as PaymentMethod[]).map((m) => (
+                <TouchableOpacity
+                  key={m}
+                  style={[s.payMethodBtn, paymentMethod === m && s.payMethodBtnActive]}
+                  onPress={() => { haptic.select(); setPaymentMethod(m); }}
+                >
+                  <Text style={[s.payMethodText, paymentMethod === m && s.payMethodTextActive]}>
+                    {m === 'cash' ? '💵 Cash' : '📱 E-transfer'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
             </View>
 
             <TouchableOpacity
@@ -1036,6 +1099,7 @@ function ConfirmedScreen({ navigate }: NavProp) {
   const { rideId, setRideId } = useContext(RideContext);
   const { ride, status } = useRideStatus(rideId);
   const driverCoords = useDriverLocation(ride?.driver_id ?? null);
+  const unreadCount = useUnreadChatCount(rideId);
   const [seconds, setSeconds] = useState(272);
 
   useEffect(() => {
@@ -1068,9 +1132,21 @@ function ConfirmedScreen({ navigate }: NavProp) {
   return (
     <ScreenTransition>
       <SafeAreaView style={s.screen}>
-        <View style={[s.topBar, { justifyContent: 'center' }]}>
-          <Text style={s.logo}>ATEE</Text>
-        </View>
+        <TopBar
+          title="ATEE"
+          rightElement={
+            (status === 'driver_assigned' || status === 'in_progress') ? (
+              <TouchableOpacity style={s.chatIconWrap} onPress={() => navigate('Chat')}>
+                <Ionicons name="chatbubble-ellipses" size={24} color="white" />
+                {unreadCount > 0 && (
+                  <View style={s.chatBadge}>
+                    <Text style={s.chatBadgeText}>{unreadCount > 9 ? '9+' : String(unreadCount)}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            ) : undefined
+          }
+        />
         <View style={{ alignItems: 'center', backgroundColor: RED, paddingVertical: 24 }}>
           <View style={s.checkCircle}>
             <Text style={{ fontSize: 26, color: RED }}>✓</Text>
@@ -1288,12 +1364,29 @@ function DriverRequestScreen({ navigate }: NavProp) {
   }
 
   const price = selectedRide.offered_price.toFixed(2);
-  const tripRows: [string, string][] = [
-    ['From', selectedRide.pickup_address],
-    ['To', selectedRide.destination_address],
-    ['Distance', `${selectedRide.distance_mi ?? '—'} miles`],
-    ['Passenger offer', `$${price}`],
-    ['You keep', `$${price} (100%)`],
+
+  const fmtScheduled = (iso: string) => {
+    const d = new Date(iso);
+    return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
+      + ' at '
+      + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const isScheduled = !!selectedRide.scheduled_for;
+
+  const tripRows: { label: string; value: string; color?: string; highlight?: boolean }[] = [
+    ...(isScheduled
+      ? [{ label: '🗓 Scheduled for', value: fmtScheduled(selectedRide.scheduled_for!), highlight: true }]
+      : []),
+    { label: 'From', value: selectedRide.pickup_address },
+    { label: 'To', value: selectedRide.destination_address },
+    { label: 'Distance', value: `${selectedRide.distance_mi ?? '—'} miles` },
+    {
+      label: 'Payment',
+      value: selectedRide.payment_method === 'etransfer' ? '📱 E-transfer' : '💵 Cash',
+    },
+    { label: 'Passenger offer', value: `$${price}`, color: RED },
+    { label: 'You keep', value: `$${price} (100%)`, color: GREEN },
   ];
 
   return (
@@ -1322,10 +1415,27 @@ function DriverRequestScreen({ navigate }: NavProp) {
                 </View>
               </View>
               <View style={s.divider} />
-              {tripRows.map(([label, val], i) => (
-                <View key={i} style={[s.rowBetween, { paddingVertical: 6 }]}>
-                  <Text style={s.muted}>{label}</Text>
-                  <Text style={[s.driverName, { color: i === 4 ? GREEN : i === 3 ? RED : '#111' }]}>{val}</Text>
+              {tripRows.map((row, i) => (
+                <View
+                  key={i}
+                  style={[
+                    s.rowBetween,
+                    { paddingVertical: 7 },
+                    row.highlight && {
+                      backgroundColor: '#FEF3C7',
+                      marginHorizontal: -14,
+                      paddingHorizontal: 14,
+                      borderRadius: 8,
+                      marginBottom: 4,
+                    },
+                  ]}
+                >
+                  <Text style={[s.muted, row.highlight && { color: '#92400E', fontWeight: '600' }]}>
+                    {row.label}
+                  </Text>
+                  <Text style={[s.driverName, { color: row.color ?? '#111', flexShrink: 1, textAlign: 'right', marginLeft: 12 }]}>
+                    {row.value}
+                  </Text>
                 </View>
               ))}
             </Animated.View>
@@ -1354,6 +1464,8 @@ function DriverRequestScreen({ navigate }: NavProp) {
 function DriverActiveScreen({ navigate }: NavProp) {
   const { selectedRide } = useContext(RideContext);
   const [loading, setLoading] = useState(false);
+  const [showPayConfirm, setShowPayConfirm] = useState(false);
+  const unreadCount = useUnreadChatCount(selectedRide?.id ?? null);
 
   const handleBackToOnboarding = () => {
     if (selectedRide) {
@@ -1376,16 +1488,22 @@ function DriverActiveScreen({ navigate }: NavProp) {
     }
   };
 
-  const handleComplete = async () => {
+  const handleComplete = () => {
+    haptic.impact();
+    setShowPayConfirm(true);
+  };
+
+  const confirmPayment = async (payStatus: 'paid' | 'disputed') => {
     if (!selectedRide || loading) return;
     try {
       setLoading(true);
       haptic.notify(Haptics.NotificationFeedbackType.Success);
-      await completeRide(selectedRide.id);
+      await completeRideWithPayment(selectedRide.id, payStatus);
       navigate('DriverComplete');
     } catch (e: any) {
-      console.warn('completeRide failed', e?.message ?? e);
+      console.warn('completeRideWithPayment failed', e?.message ?? e);
       setLoading(false);
+      setShowPayConfirm(false);
     }
   };
 
@@ -1410,10 +1528,26 @@ function DriverActiveScreen({ navigate }: NavProp) {
     );
   }
 
+  const payMethodLabel =
+    selectedRide.payment_method === 'etransfer' ? '📱 E-transfer' : '💵 Cash';
+
   return (
     <ScreenTransition>
       <SafeAreaView style={s.screen}>
-        <TopBar title="Active Trip" onBack={handleBackToOnboarding} />
+        <TopBar
+          title="Active Trip"
+          onBack={handleBackToOnboarding}
+          rightElement={
+            <TouchableOpacity style={s.chatIconWrap} onPress={() => navigate('Chat')}>
+              <Ionicons name="chatbubble-ellipses" size={24} color="white" />
+              {unreadCount > 0 && (
+                <View style={s.chatBadge}>
+                  <Text style={s.chatBadgeText}>{unreadCount > 9 ? '9+' : String(unreadCount)}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          }
+        />
         <View style={{ paddingHorizontal: 16, paddingTop: 12 }}>
           <MapView
             origin={selectedRide.pickup_lat && selectedRide.pickup_lng
@@ -1441,20 +1575,55 @@ function DriverActiveScreen({ navigate }: NavProp) {
               </View>
               <Text style={[s.tripPrice, { color: RED }]}>${selectedRide.offered_price.toFixed(2)}</Text>
             </View>
+            <View style={s.divider} />
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={s.cardLabel}>PAYMENT METHOD</Text>
+              <View style={s.greenBadge}>
+                <Text style={s.greenBadgeText}>{payMethodLabel}</Text>
+              </View>
+            </View>
           </View>
           <View style={s.statRow}>
             <View style={s.statBox}><Text style={s.statLabel}>ETA</Text><Text style={s.statValue}>{selectedRide.eta_min != null ? `${selectedRide.eta_min} min` : '—'}</Text></View>
             <View style={s.statBox}><Text style={s.statLabel}>Distance</Text><Text style={s.statValue}>{selectedRide.distance_mi != null ? `${selectedRide.distance_mi} mi` : '—'}</Text></View>
           </View>
-          <TouchableOpacity
-            style={[s.redBtn, { opacity: loading ? 0.6 : 1 }]}
-            onPress={handleComplete}
-            disabled={loading}
-          >
-            {loading
-              ? <ActivityIndicator color="white" />
-              : <Text style={s.redBtnText}>Complete Trip</Text>}
-          </TouchableOpacity>
+
+          {!showPayConfirm ? (
+            <TouchableOpacity style={s.redBtn} onPress={handleComplete} disabled={loading}>
+              <Text style={s.redBtnText}>Complete Trip</Text>
+            </TouchableOpacity>
+          ) : (
+            <View style={[s.card, { backgroundColor: '#fdf6ec', borderColor: AMBER }]}>
+              <Text style={[s.driverName, { marginBottom: 4 }]}>Did the passenger pay?</Text>
+              <Text style={[s.muted, { marginBottom: 12 }]}>
+                {selectedRide.payment_method === 'etransfer'
+                  ? 'Confirm you received the e-transfer.'
+                  : 'Confirm you received cash.'}
+              </Text>
+              <TouchableOpacity
+                style={[s.redBtn, { backgroundColor: GREEN, opacity: loading ? 0.6 : 1 }]}
+                onPress={() => confirmPayment('paid')}
+                disabled={loading}
+              >
+                {loading
+                  ? <ActivityIndicator color="white" />
+                  : <Text style={s.redBtnText}>Yes, Paid ✓</Text>}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.outlineBtn, { borderColor: RED, marginTop: 8, opacity: loading ? 0.6 : 1 }]}
+                onPress={() => confirmPayment('disputed')}
+                disabled={loading}
+              >
+                <Text style={[s.outlineBtnText, { color: RED }]}>Not Paid — Mark Disputed</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{ alignItems: 'center', marginTop: 10 }}
+                onPress={() => setShowPayConfirm(false)}
+              >
+                <Text style={s.muted}>← Go back</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </ScrollView>
         <BottomNav active="Trips" navigate={navigate} mode="driver" />
       </SafeAreaView>
@@ -1519,14 +1688,375 @@ function DriverCompleteScreen({ navigate }: NavProp) {
   );
 }
 
+// ─── CHAT ─────────────────────────────────────────────────────
+const QUICK_REPLIES = [
+  "I'm outside 👋",
+  'Be there in 2 min 🕐',
+  'Need to cancel ⚠️',
+  'On my way 🚗',
+];
+
+function relativeTime(iso: string): string {
+  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (diff < 60) return 'Just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)} min ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} hr ago`;
+  return new Date(iso).toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function ChatScreen({ navigate }: NavProp) {
+  const { rideId, selectedRide } = useContext(RideContext);
+  const { profile } = useMyProfile();
+
+  const isDriver = profile?.role === 'driver' || profile?.role === 'both';
+  // Driver: use selectedRide; Passenger: fall back to rideId
+  const activeRideId = selectedRide?.id ?? rideId;
+  // Fetch live ride so passenger side always has driver_id resolved
+  const { ride: liveRide } = useRideStatus(activeRideId);
+  const recipientId = isDriver
+    ? (liveRide?.passenger_id ?? selectedRide?.passenger_id ?? null)
+    : (liveRide?.driver_id ?? null);
+
+  const { messages, loading } = useChatMessages(activeRideId);
+  const [myId, setMyId] = useState<string | null>(null);
+  const [text, setText] = useState('');
+  const [sending, setSending] = useState(false);
+  const scrollRef = useRef<ScrollView>(null);
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setMyId(data.user?.id ?? null));
+  }, []);
+
+  useEffect(() => {
+    if (messages.length > 0) {
+      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
+    }
+  }, [messages.length]);
+
+  const handleBack = () => navigate(isDriver ? 'DriverActive' : 'Confirmed');
+
+  const safeSend = async (fn: () => Promise<ChatMessage>) => {
+    if (!activeRideId || !recipientId) return;
+    try {
+      setSending(true);
+      await fn();
+    } catch (e: any) {
+      console.warn('[Chat] send failed', e?.message ?? e);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const sendText = () => {
+    const body = text.trim();
+    if (!body || !activeRideId || !recipientId) return;
+    setText('');
+    safeSend(() => sendTextMessage(activeRideId, recipientId, body));
+  };
+
+  const sendQuick = (label: string) => {
+    if (!activeRideId || !recipientId) return;
+    safeSend(() => sendQuickReply(activeRideId, recipientId, label));
+  };
+
+  const sendLocation = async () => {
+    if (!activeRideId || !recipientId) return;
+    const result = await getCurrentPosition();
+    if (result.status !== 'ok') {
+      Alert.alert('Location unavailable', 'Enable location access and try again.');
+      return;
+    }
+    safeSend(() =>
+      sendLocationMessage(activeRideId, recipientId, result.coords.lat, result.coords.lng, '📍 Shared my location'),
+    );
+  };
+
+  const otherPartyName = isDriver ? 'Passenger' : 'Your Driver';
+
+  if (!activeRideId) {
+    return (
+      <SafeAreaView style={s.screen}>
+        <TopBar title="Chat" onBack={handleBack} />
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <Text style={s.muted}>No active ride.</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <ScreenTransition>
+      <SafeAreaView style={s.screen}>
+        <TopBar title={otherPartyName} onBack={handleBack} />
+
+        {/* Message list */}
+        <ScrollView
+          ref={scrollRef}
+          style={{ flex: 1 }}
+          contentContainerStyle={{ padding: 12, paddingBottom: 4 }}
+          keyboardShouldPersistTaps="handled"
+          onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
+        >
+          {loading ? (
+            <View style={{ alignItems: 'center', paddingTop: 32 }}>
+              <ActivityIndicator color={RED} />
+            </View>
+          ) : messages.length === 0 ? (
+            <View style={s.chatEmptyWrap}>
+              <Ionicons name="chatbubbles-outline" size={48} color="#ddd" />
+              <Text style={[s.muted, { marginTop: 10, fontSize: 14 }]}>
+                Say hi to your {otherPartyName.toLowerCase()}
+              </Text>
+            </View>
+          ) : (
+            messages.map((msg) => {
+              const mine = msg.sender_id === myId;
+              return (
+                <View
+                  key={msg.id}
+                  style={[s.chatBubbleRow, mine ? s.chatBubbleRowMine : s.chatBubbleRowTheirs]}
+                >
+                  <View style={[s.chatBubble, mine ? s.chatBubbleMine : s.chatBubbleTheirs]}>
+                    {msg.type === 'location' ? (
+                      <View>
+                        <Text style={[s.chatBubbleText, mine && { color: 'white' }]}>
+                          {msg.body ?? '📍 Location'}
+                        </Text>
+                        <View style={{ marginTop: 6, borderRadius: 8, overflow: 'hidden' }}>
+                          <MapView
+                            origin={msg.lat != null && msg.lng != null ? { lat: msg.lat, lng: msg.lng } : null}
+                            height={120}
+                          />
+                        </View>
+                      </View>
+                    ) : (
+                      <Text style={[s.chatBubbleText, mine && { color: 'white' }]}>
+                        {msg.body}
+                      </Text>
+                    )}
+                    <Text style={[s.chatTimestamp, mine && { color: 'rgba(255,255,255,0.65)' }]}>
+                      {relativeTime(msg.created_at)}
+                    </Text>
+                  </View>
+                </View>
+              );
+            })
+          )}
+        </ScrollView>
+
+        {/* Quick replies */}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={s.quickReplyRow}
+          keyboardShouldPersistTaps="handled"
+        >
+          {QUICK_REPLIES.map((label) => (
+            <TouchableOpacity
+              key={label}
+              style={s.quickReplyChip}
+              onPress={() => { haptic.select(); sendQuick(label); }}
+              disabled={sending}
+            >
+              <Text style={s.quickReplyText}>{label}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+
+        {/* Input bar */}
+        <View style={s.chatInputBar}>
+          <TouchableOpacity style={s.chatInputIcon} onPress={sendLocation} disabled={sending}>
+            <Ionicons name="location" size={22} color={RED} />
+          </TouchableOpacity>
+          <TextInput
+            style={s.chatInput}
+            placeholder="Message..."
+            placeholderTextColor="#aaa"
+            value={text}
+            onChangeText={setText}
+            onSubmitEditing={sendText}
+            returnKeyType="send"
+            multiline={false}
+          />
+          <TouchableOpacity
+            style={[s.chatSendBtn, (!text.trim() || sending) && { opacity: 0.4 }]}
+            onPress={sendText}
+            disabled={!text.trim() || sending}
+          >
+            <Ionicons name="send" size={18} color="white" />
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    </ScreenTransition>
+  );
+}
+
+// ─── TRIPS HISTORY ────────────────────────────────────────────
+function TripsScreen({ navigate }: NavProp) {
+  const { profile } = useMyProfile();
+  const isDriver = profile?.role === 'driver' || profile?.role === 'both';
+  const [activeTab, setActiveTab] = useState<'passenger' | 'driver'>('passenger');
+  const [passengerRides, setPassengerRides] = useState<RideType[]>([]);
+  const [driverRides, setDriverRides] = useState<RideType[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    const fetches: Promise<void>[] = [
+      fetchRecentRidesForPassenger(30)
+        .then((r) => { if (!cancelled) setPassengerRides(r); })
+        .catch(() => {}),
+    ];
+    if (isDriver) {
+      fetches.push(
+        fetchDriverRides(30)
+          .then((r) => { if (!cancelled) setDriverRides(r); })
+          .catch(() => {}),
+      );
+    }
+    Promise.all(fetches).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [isDriver]);
+
+  const rides = activeTab === 'driver' ? driverRides : passengerRides;
+
+  const fmtDate = (iso: string | null) => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    const now = new Date();
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (d.toDateString() === now.toDateString()) return `Today · ${time}`;
+    if (d.toDateString() === yesterday.toDateString()) return `Yesterday · ${time}`;
+    return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} · ${time}`;
+  };
+
+  const statusColor = (status: string) => {
+    if (status === 'completed') return GREEN;
+    if (status === 'cancelled') return '#aaa';
+    return AMBER;
+  };
+
+  const statusLabel = (status: string) => {
+    if (status === 'completed') return 'Completed';
+    if (status === 'cancelled') return 'Cancelled';
+    return status.replace('_', ' ');
+  };
+
+  const navMode = isDriver ? 'driver' : 'passenger';
+
+  return (
+    <ScreenTransition>
+      <SafeAreaView style={s.screen}>
+        <TopBar title="My Trips" onBack={() => navigate(isDriver ? 'DriverHome' : 'Home')} />
+        <ScrollView contentContainerStyle={{ padding: 16 }}>
+          {isDriver && (
+            <View style={[s.tabRow, { marginBottom: 16 }]}>
+              <TouchableOpacity
+                style={activeTab === 'passenger' ? s.tabActive : s.tabInactive}
+                onPress={() => { haptic.select(); setActiveTab('passenger'); }}
+              >
+                <Text style={activeTab === 'passenger' ? s.tabActiveText : s.tabInactiveText}>
+                  As Passenger
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={activeTab === 'driver' ? s.tabActive : s.tabInactive}
+                onPress={() => { haptic.select(); setActiveTab('driver'); }}
+              >
+                <Text style={activeTab === 'driver' ? s.tabActiveText : s.tabInactiveText}>
+                  As Driver
+                </Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {loading ? (
+            <><SkeletonCard /><SkeletonCard /><SkeletonCard /></>
+          ) : rides.length === 0 ? (
+            <View style={{ alignItems: 'center', paddingVertical: 48 }}>
+              <Ionicons name="car-outline" size={48} color="#ddd" />
+              <Text style={[s.muted, { marginTop: 12, fontSize: 14 }]}>No trips yet.</Text>
+            </View>
+          ) : (
+            rides.map((ride) => (
+              <View key={ride.id} style={s.tripHistoryCard}>
+                <View style={[s.rowBetween, { marginBottom: 8 }]}>
+                  <Text style={[s.muted, { fontSize: 11 }]}>{fmtDate(ride.completed_at ?? ride.created_at)}</Text>
+                  <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
+                    {ride.payment_method && (
+                      <View style={s.greenBadge}>
+                        <Text style={s.greenBadgeText}>
+                          {ride.payment_method === 'etransfer' ? '📱 E-transfer' : '💵 Cash'}
+                        </Text>
+                      </View>
+                    )}
+                    <View style={[s.greenBadge, { backgroundColor: statusColor(ride.status) + '22' }]}>
+                      <Text style={[s.greenBadgeText, { color: statusColor(ride.status) }]}>
+                        {statusLabel(ride.status)}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+
+                <View style={{ flexDirection: 'row', gap: 10 }}>
+                  <View style={s.routeTrack}>
+                    <View style={[s.routeDot, { backgroundColor: GREEN }]} />
+                    <View style={s.routeLine} />
+                    <View style={[s.routeDot, { backgroundColor: RED }]} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.tripHistoryAddr} numberOfLines={1}>{ride.pickup_address}</Text>
+                    <View style={{ height: 10 }} />
+                    <Text style={[s.tripHistoryAddr, { color: RED }]} numberOfLines={1}>{ride.destination_address}</Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end', justifyContent: 'center' }}>
+                    <Text style={[s.tripPrice, { color: ride.status === 'completed' ? RED : '#aaa' }]}>
+                      ${ride.offered_price.toFixed(2)}
+                    </Text>
+                    {ride.distance_mi != null && (
+                      <Text style={s.muted}>{ride.distance_mi} mi</Text>
+                    )}
+                  </View>
+                </View>
+
+                {ride.scheduled_for && (
+                  <View style={[s.rowBetween, { marginTop: 8, backgroundColor: '#FEF3C7', borderRadius: 6, padding: 6 }]}>
+                    <Text style={[s.muted, { color: '#92400E', fontSize: 11 }]}>🗓 Scheduled</Text>
+                    <Text style={[s.muted, { color: '#92400E', fontSize: 11 }]}>
+                      {new Date(ride.scheduled_for).toLocaleString([], {
+                        month: 'short', day: 'numeric',
+                        hour: '2-digit', minute: '2-digit',
+                      })}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            ))
+          )}
+        </ScrollView>
+        <BottomNav active="Trips" navigate={navigate} mode={navMode} />
+      </SafeAreaView>
+    </ScreenTransition>
+  );
+}
+
 // ─── DRIVER EARNINGS ──────────────────────────────────────────
 function DriverEarningsScreen({ navigate }: NavProp) {
-  const { balanceCents, earnings, loading } = useDriverWallet();
+  const {
+    totalEarnedCents,
+    totalCashCents,
+    totalEtransferCents,
+    tripsCompleted,
+    tripsDisputed,
+    earnings,
+    loading,
+  } = useDriverWallet();
 
-  const balanceDisplay = `$${(balanceCents / 100).toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+  const fmt = (cents: number) =>
+    `$${(cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   const fmtTime = (iso: string) => {
     const d = new Date(iso);
@@ -1544,35 +2074,56 @@ function DriverEarningsScreen({ navigate }: NavProp) {
       <SafeAreaView style={s.screen}>
         <TopBar title="Earnings" onBack={() => navigate('Onboarding')} />
         <ScrollView contentContainerStyle={{ padding: 16 }}>
-          <Text style={s.muted}>Total balance</Text>
-          <Text style={[s.bigTitle, { color: RED }]}>{balanceDisplay}</Text>
-          <View style={s.greenBadge}><Text style={s.greenBadgeText}>Verified · $0 commission taken</Text></View>
-          <View style={[s.tabRow, { marginTop: 12 }]}>
-            {['Daily', 'Weekly', 'Monthly'].map((t, i) => (
-              <TouchableOpacity key={i} style={i === 0 ? s.tabActive : s.tabInactive}>
-                <Text style={i === 0 ? s.tabActiveText : s.tabInactiveText}>{t}</Text>
-              </TouchableOpacity>
-            ))}
+          <Text style={s.muted}>Total earned (lifetime)</Text>
+          <Text style={[s.bigTitle, { color: RED, fontSize: 34 }]}>{fmt(totalEarnedCents)}</Text>
+          <Text style={[s.muted, { marginBottom: 8 }]}>Lifetime fares · paid directly to you</Text>
+          <View style={s.greenBadge}>
+            <Text style={s.greenBadgeText}>100% yours · $0 commission · no platform cut</Text>
           </View>
-          <Text style={[s.sectionTitle, { marginTop: 12 }]}>Recent Earnings</Text>
+
+          <View style={[s.statRow, { marginTop: 16 }]}>
+            <View style={s.statBox}>
+              <Text style={s.statLabel}>💵 Cash</Text>
+              <Text style={[s.statValue, { fontSize: 13 }]}>{fmt(totalCashCents)}</Text>
+            </View>
+            <View style={s.statBox}>
+              <Text style={s.statLabel}>📱 E-transfer</Text>
+              <Text style={[s.statValue, { fontSize: 13 }]}>{fmt(totalEtransferCents)}</Text>
+            </View>
+            <View style={s.statBox}>
+              <Text style={s.statLabel}>Trips</Text>
+              <Text style={s.statValue}>{tripsCompleted}</Text>
+              {tripsDisputed > 0 && (
+                <Text style={[s.muted, { color: AMBER }]}>{tripsDisputed} disputed</Text>
+              )}
+            </View>
+          </View>
+
+          <Text style={[s.sectionTitle, { marginTop: 4 }]}>Recent Trips</Text>
           {loading ? (
             <><SkeletonCard /><SkeletonCard /></>
           ) : earnings.length === 0 ? (
-            <Text style={s.muted}>No earnings yet.</Text>
+            <Text style={s.muted}>No trips recorded yet.</Text>
           ) : (
             earnings.map((e) => (
               <View key={e.id} style={s.tripRow}>
+                <View style={{ width: 28, alignItems: 'center' }}>
+                  <Text>{e.payment_method === 'etransfer' ? '📱' : '💵'}</Text>
+                </View>
                 <View style={{ flex: 1 }}>
                   <Text style={s.driverName} numberOfLines={1}>{e.destination}</Text>
                   <Text style={s.muted}>{fmtTime(e.completed_at)}</Text>
                 </View>
-                <Text style={[s.tripPrice, { color: RED }]}>${(e.amount_cents / 100).toFixed(2)}</Text>
+                <Text style={[s.tripPrice, { color: e.amount_cents > 0 ? RED : '#aaa' }]}>
+                  {e.amount_cents > 0 ? fmt(e.amount_cents) : 'Disputed'}
+                </Text>
               </View>
             ))
           )}
-          <TouchableOpacity style={[s.redBtn, { marginTop: 8 }]} onPress={() => navigate('DriverHome')}>
-            <Text style={s.redBtnText}>Withdraw Funds</Text>
-          </TouchableOpacity>
+
+          <Text style={[s.muted, { textAlign: 'center', marginTop: 16, paddingHorizontal: 16 }]}>
+            Payments are collected directly from passengers in cash or e-transfer.
+          </Text>
         </ScrollView>
         <BottomNav active="Earnings" navigate={navigate} mode="driver" />
       </SafeAreaView>
@@ -1855,6 +2406,8 @@ export default function App() {
     Auth: <AuthScreen onSignedIn={() => navigate('Home')} />,
     Profile: <ProfileScreen navigate={navigate} />,
     DriverVerification: <DriverVerificationScreen navigate={navigate} />,
+    Trips: <TripsScreen navigate={navigate} />,
+    Chat: <ChatScreen navigate={navigate} />,
   };
 
   if (!authChecked) {
@@ -2028,4 +2581,30 @@ const s = StyleSheet.create({
   kycBadgeTextPending: { fontSize: 10, fontWeight: '600' as const, color: AMBER },
   kycBadgeTextApproved: { fontSize: 10, fontWeight: '600' as const, color: GREEN },
   kycBadgeTextRejected: { fontSize: 10, fontWeight: '600' as const, color: RED },
+  payMethodBtn: { flex: 1, borderWidth: 1, borderColor: 'rgba(255,255,255,0.35)', padding: 10, borderRadius: 10, alignItems: 'center' },
+  payMethodBtnActive: { backgroundColor: 'white', borderColor: 'white' },
+  payMethodText: { fontSize: 13, color: 'rgba(255,255,255,0.75)', fontWeight: '500' },
+  payMethodTextActive: { color: RED, fontWeight: '600' },
+  tripHistoryCard: { backgroundColor: '#fafafa', borderRadius: 14, padding: 14, marginBottom: 12, borderWidth: 0.5, borderColor: '#eee' },
+  tripHistoryAddr: { fontSize: 13, fontWeight: '500', color: '#111' },
+  // Chat
+  chatIconWrap: { position: 'relative', width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
+  chatBadge: { position: 'absolute', top: -4, right: -6, backgroundColor: '#FFD700', borderRadius: 9, minWidth: 18, height: 18, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 },
+  chatBadgeText: { fontSize: 10, fontWeight: '700', color: '#111' },
+  chatEmptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 64 },
+  chatBubbleRow: { flexDirection: 'row', marginBottom: 8 },
+  chatBubbleRowMine: { justifyContent: 'flex-end' },
+  chatBubbleRowTheirs: { justifyContent: 'flex-start' },
+  chatBubble: { maxWidth: '78%', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 8 },
+  chatBubbleMine: { backgroundColor: RED, borderBottomRightRadius: 4 },
+  chatBubbleTheirs: { backgroundColor: '#f0f0f0', borderBottomLeftRadius: 4 },
+  chatBubbleText: { fontSize: 14, color: '#111', lineHeight: 20 },
+  chatTimestamp: { fontSize: 10, color: '#aaa', marginTop: 4, textAlign: 'right' },
+  quickReplyRow: { paddingHorizontal: 12, paddingVertical: 8, gap: 8 },
+  quickReplyChip: { backgroundColor: '#f0f0f0', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8, borderWidth: 0.5, borderColor: '#ddd' },
+  quickReplyText: { fontSize: 13, color: '#333' },
+  chatInputBar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 8, borderTopWidth: 0.5, borderTopColor: '#eee', backgroundColor: 'white', gap: 8 },
+  chatInputIcon: { padding: 4 },
+  chatInput: { flex: 1, backgroundColor: '#f5f5f5', borderRadius: 22, paddingHorizontal: 14, paddingVertical: 8, fontSize: 14, color: '#111', borderWidth: 0.5, borderColor: '#eee' },
+  chatSendBtn: { backgroundColor: RED, borderRadius: 22, width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
 });

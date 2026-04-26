@@ -2,10 +2,9 @@
 // All ride-related Supabase calls. Import these in your screens.
 
 import { supabase } from './supabase';
-import type { Ride, RideBid, RideStatus } from './types';
+import type { Ride, RideBid, RideStatus, PaymentMethod, RidePaymentStatus } from './types';
 
-// Re-export for backwards compatibility — all existing screens import from here.
-export type { Ride, RideBid, RideStatus } from './types';
+export type { Ride, RideBid, RideStatus, PaymentMethod, RidePaymentStatus } from './types';
 
 // ──────────────────────────────────────────────────────────────
 // PASSENGER SIDE
@@ -26,6 +25,7 @@ export async function createRide(params: {
   distance_mi?: number;
   eta_min?: number;
   scheduled_for?: string;
+  payment_method: PaymentMethod;
 }): Promise<Ride> {
   const { data: user } = await supabase.auth.getUser();
   if (!user.user) throw new Error('Not authenticated');
@@ -187,6 +187,25 @@ export async function completeRide(rideId: string) {
   const { error } = await supabase
     .from('rides')
     .update({ status: 'completed', completed_at: new Date().toISOString() })
+    .eq('id', rideId);
+  if (error) throw error;
+}
+
+/**
+ * Driver completes a ride and records whether the passenger paid or disputed.
+ * The DB trigger update_wallet_on_ride_complete fires and updates the wallet.
+ */
+export async function completeRideWithPayment(
+  rideId: string,
+  paymentStatus: 'paid' | 'disputed',
+) {
+  const { error } = await supabase
+    .from('rides')
+    .update({
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+      payment_status: paymentStatus,
+    })
     .eq('id', rideId);
   if (error) throw error;
 }

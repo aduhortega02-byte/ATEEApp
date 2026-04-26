@@ -111,6 +111,10 @@ export type DriverWallet = {
   balance_cents: number;
   total_earned_cents: number;
   total_withdrawn_cents: number;
+  total_cash_cents: number;
+  total_etransfer_cents: number;
+  trips_completed: number;
+  trips_disputed: number;
   updated_at: string;
 };
 
@@ -134,6 +138,9 @@ export type RideStatus =
   | 'completed'
   | 'cancelled';
 
+export type PaymentMethod = 'cash' | 'etransfer';
+export type RidePaymentStatus = 'pending' | 'paid' | 'disputed';
+
 export type Ride = {
   id: string;
   passenger_id: string;
@@ -148,6 +155,8 @@ export type Ride = {
   distance_mi: number | null;
   eta_min: number | null;
   status: RideStatus;
+  payment_method: PaymentMethod | null;
+  payment_status: RidePaymentStatus;
   scheduled_for: string | null;
   created_at: string;
   completed_at: string | null;
