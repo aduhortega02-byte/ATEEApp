@@ -20,6 +20,7 @@ import {
 } from 'react-native';
 
 import MapView from '../../components/MapView';
+import DriverAvatar from '../../components/DriverAvatar';
 import { getCurrentPosition } from '../../lib/geolocation';
 import {
   geocodePlace,
@@ -57,6 +58,7 @@ import { startLocationStream, stopLocationStream } from '../../lib/locationStrea
 import { fetchRecentRidesForPassenger, fetchDriverRides } from '../../lib/passenger';
 import type { Ride as RideType } from '../../lib/types';
 import { sendTextMessage, sendLocationMessage, sendQuickReply, type ChatMessage } from '../../lib/chat';
+import { submitRating } from '../../lib/ratings';
 import { useChatMessages } from '../../hooks/useChatMessages';
 import { useUnreadChatCount } from '../../hooks/useUnreadChatCount';
 import { Session } from '@supabase/supabase-js';
@@ -66,6 +68,13 @@ const { width } = Dimensions.get('window');
 const RED = '#8B0000';
 const GREEN = '#3B6D11';
 const AMBER = '#BA7517';
+
+function getInitials(name?: string | null): string {
+  if (!name?.trim()) return '??';
+  const parts = name.trim().split(/\s+/);
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
 
 // Safe haptics wrapper — won't crash on web
 const haptic = {
@@ -95,7 +104,8 @@ type ScreenName =
   | 'Profile'
   | 'DriverVerification'
   | 'Trips'
-  | 'Chat';
+  | 'Chat'
+  | 'RateTrip';
 
 type NavProp = { navigate: (s: ScreenName) => void };
 
@@ -1009,13 +1019,6 @@ function DriversScreen({ navigate }: NavProp) {
   // Deterministic colors per bid so each avatar keeps the same color on refetch
   const colors = [RED, GREEN, '#185FA5', '#BA7517', '#6b21a8'];
 
-  const getInitials = (name: string | null | undefined) => {
-    if (!name) return '??';
-    const parts = name.trim().split(/\s+/);
-    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-  };
-
   const pick = async (driverId: string) => {
     if (!rideId || choosing) return;
     try {
@@ -1063,9 +1066,11 @@ function DriversScreen({ navigate }: NavProp) {
                     onPress={() => pick(bid.driver_id)}
                     disabled={!!choosing}
                   >
-                    <View style={[s.avatarCircle, { backgroundColor: colors[i % colors.length] }]}>
-                      <Text style={s.avatarText}>{getInitials(name)}</Text>
-                    </View>
+                    <DriverAvatar
+                      driverId={bid.driver_id}
+                      initials={getInitials(name)}
+                      background={colors[i % colors.length]}
+                    />
                     <View style={{ flex: 1 }}>
                       <Text style={s.driverName}>{name}</Text>
                       <Text style={s.muted}>⭐ {rating} · {trips} trips · Verified</Text>
@@ -1108,13 +1113,12 @@ function ConfirmedScreen({ navigate }: NavProp) {
     return () => clearInterval(t);
   }, []);
 
-  // When the driver completes the trip, auto-return home
+  // When the driver completes the trip, send passenger to rating screen
   useEffect(() => {
     if (status === 'completed') {
       const t = setTimeout(() => {
-        setRideId(null);
-        navigate('Home');
-      }, 2000);
+        navigate('RateTrip'); // keep rideId — RateTrip needs it
+      }, 1500);
       return () => clearTimeout(t);
     }
   }, [status]);
@@ -1185,6 +1189,21 @@ function ConfirmedScreen({ navigate }: NavProp) {
           />
         </View>
         <ScrollView contentContainerStyle={{ padding: 16 }}>
+          {ride?.driver_id && (
+            <View style={[s.card, { marginBottom: 12 }]}>
+              <View style={s.driverCardInner}>
+                <DriverAvatar
+                  driverId={ride.driver_id}
+                  initials="DR"
+                  size={48}
+                />
+                <View style={{ flex: 1 }}>
+                  <Text style={s.driverName}>Your Driver</Text>
+                  <Text style={s.muted}>On the way to you</Text>
+                </View>
+              </View>
+            </View>
+          )}
           <View style={s.card}>
             {rows.map(([label, val], i) => (
               <View key={i} style={[s.rowBetween, { paddingVertical: 6, borderBottomWidth: i < 2 ? 0.5 : 0, borderColor: '#eee' }]}>
@@ -1891,6 +1910,130 @@ function ChatScreen({ navigate }: NavProp) {
   );
 }
 
+// ─── RATE TRIP ────────────────────────────────────────────────
+function RateTripScreen({ navigate }: NavProp) {
+  const { rideId, setRideId } = useContext(RideContext);
+  const { ride } = useRideStatus(rideId);
+
+  const [stars, setStars] = useState(5);
+  const [comment, setComment] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [driverName, setDriverName] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!ride?.driver_id) return;
+    supabase
+      .from('profiles')
+      .select('full_name')
+      .eq('id', ride.driver_id)
+      .single()
+      .then(({ data }) => {
+        if (data) setDriverName((data as { full_name: string | null }).full_name);
+      });
+  }, [ride?.driver_id]);
+
+  const finish = () => {
+    setRideId(null);
+    navigate('Home');
+  };
+
+  const handleSubmit = async () => {
+    if (!rideId || !ride?.driver_id || submitting) return;
+    try {
+      setSubmitting(true);
+      await submitRating({
+        rideId,
+        driverId: ride.driver_id,
+        stars,
+        comment: comment.trim() || undefined,
+      });
+      haptic.notify(Haptics.NotificationFeedbackType.Success);
+      finish();
+    } catch (e: any) {
+      // 23505 = unique_violation — already rated, treat as success
+      if (e?.code === '23505') { finish(); return; }
+      haptic.notify(Haptics.NotificationFeedbackType.Error);
+      Alert.alert('Could not submit rating', e?.message ?? 'Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <ScreenTransition>
+      <SafeAreaView style={s.screen}>
+        <TopBar title="Rate your trip" />
+        <ScrollView contentContainerStyle={{ padding: 24 }} keyboardShouldPersistTaps="handled">
+          <View style={{ alignItems: 'center', marginBottom: 28 }}>
+            <DriverAvatar
+              driverId={ride?.driver_id ?? null}
+              initials={getInitials(driverName)}
+              size={72}
+            />
+            <Text style={[s.bigTitle, { textAlign: 'center', marginBottom: 4 }]}>
+              Thanks for riding with ATEE
+            </Text>
+            {driverName && (
+              <Text style={[s.muted, { fontSize: 14 }]}>
+                Your driver was <Text style={{ fontWeight: '600', color: '#111' }}>{driverName}</Text>
+              </Text>
+            )}
+          </View>
+
+          <Text style={[s.sectionTitle, { textAlign: 'center', marginBottom: 12 }]}>
+            How was your trip?
+          </Text>
+
+          <View style={s.starRow}>
+            {[1, 2, 3, 4, 5].map((n) => (
+              <TouchableOpacity
+                key={n}
+                onPress={() => { haptic.select(); setStars(n); }}
+                hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+              >
+                <Text style={s.starIcon}>{n <= stars ? '⭐' : '☆'}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <Text style={[s.muted, { textAlign: 'center', marginBottom: 16 }]}>
+            {stars === 5 ? 'Excellent!' : stars === 4 ? 'Good' : stars === 3 ? 'Okay' : stars === 2 ? 'Poor' : 'Terrible'}
+          </Text>
+
+          <TextInput
+            style={s.ratingCommentInput}
+            placeholder="Tell us how it went — optional"
+            placeholderTextColor="#aaa"
+            value={comment}
+            onChangeText={setComment}
+            multiline
+            maxLength={280}
+            textAlignVertical="top"
+          />
+
+          <TouchableOpacity
+            style={[s.redBtn, { marginTop: 20, opacity: submitting ? 0.6 : 1 }]}
+            onPress={handleSubmit}
+            disabled={submitting}
+          >
+            {submitting
+              ? <ActivityIndicator color="white" />
+              : <Text style={s.redBtnText}>Submit Rating</Text>}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[s.outlineBtn, { opacity: submitting ? 0.4 : 1 }]}
+            onPress={finish}
+            disabled={submitting}
+          >
+            <Text style={s.outlineBtnText}>Skip</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </SafeAreaView>
+    </ScreenTransition>
+  );
+}
+
 // ─── TRIPS HISTORY ────────────────────────────────────────────
 function TripsScreen({ navigate }: NavProp) {
   const { profile } = useMyProfile();
@@ -2169,6 +2312,21 @@ function ProfileScreen({ navigate }: NavProp) {
       <SafeAreaView style={s.screen}>
         <TopBar title="Profile" onBack={() => navigate('Onboarding')} />
         <ScrollView contentContainerStyle={{ padding: 16 }}>
+          {profile?.role === 'driver' || profile?.role === 'both' ? (
+            <View style={{ alignItems: 'center', marginBottom: 20 }}>
+              <DriverAvatar
+                driverId={profile.id}
+                initials={getInitials(profile.full_name)}
+                size={72}
+              />
+              <TouchableOpacity
+                style={{ marginTop: 8 }}
+                onPress={() => navigate('DriverVerification')}
+              >
+                <Text style={[s.muted, { color: RED, fontSize: 12 }]}>Edit photo →</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
           {loading ? (
             <SkeletonCard />
           ) : (
@@ -2408,6 +2566,7 @@ export default function App() {
     DriverVerification: <DriverVerificationScreen navigate={navigate} />,
     Trips: <TripsScreen navigate={navigate} />,
     Chat: <ChatScreen navigate={navigate} />,
+    RateTrip: <RateTripScreen navigate={navigate} />,
   };
 
   if (!authChecked) {
@@ -2607,4 +2766,8 @@ const s = StyleSheet.create({
   chatInputIcon: { padding: 4 },
   chatInput: { flex: 1, backgroundColor: '#f5f5f5', borderRadius: 22, paddingHorizontal: 14, paddingVertical: 8, fontSize: 14, color: '#111', borderWidth: 0.5, borderColor: '#eee' },
   chatSendBtn: { backgroundColor: RED, borderRadius: 22, width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
+  // Rating
+  starRow: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: 8 },
+  starIcon: { fontSize: 40 },
+  ratingCommentInput: { backgroundColor: '#f5f5f5', borderRadius: 12, padding: 14, fontSize: 14, color: '#111', borderWidth: 0.5, borderColor: '#ddd', minHeight: 90 },
 });
