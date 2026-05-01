@@ -59,6 +59,8 @@ import { fetchRecentRidesForPassenger, fetchDriverRides } from '../../lib/passen
 import type { Ride as RideType } from '../../lib/types';
 import { sendTextMessage, sendLocationMessage, sendQuickReply, type ChatMessage } from '../../lib/chat';
 import { submitRating } from '../../lib/ratings';
+import { saveMyVehicle, isVehicleComplete, type VehicleInput } from '../../lib/vehicle';
+import { useMyVehicle } from '../../hooks/useMyVehicle';
 import { useChatMessages } from '../../hooks/useChatMessages';
 import { useUnreadChatCount } from '../../hooks/useUnreadChatCount';
 import { Session } from '@supabase/supabase-js';
@@ -105,7 +107,8 @@ type ScreenName =
   | 'DriverVerification'
   | 'Trips'
   | 'Chat'
-  | 'RateTrip';
+  | 'RateTrip'
+  | 'VehicleProfile';
 
 type NavProp = { navigate: (s: ScreenName) => void };
 
@@ -1224,13 +1227,36 @@ function ConfirmedScreen({ navigate }: NavProp) {
 // ─── DRIVER HOME (live queue from Realtime) ───────────────────
 function DriverHomeScreen({ navigate }: NavProp) {
   const { setSelectedRide } = useContext(RideContext);
-  const [online, setOnline] = useState(true);
+  const [online, setOnline] = useState(false);
   const { rides } = useDriverQueue(online);
   const { stats: todayStats } = useDriverTodayStats();
+  const { isComplete: vehicleComplete } = useMyVehicle();
+
+  const goOnline = () => {
+    if (!vehicleComplete) {
+      Alert.alert('Vehicle required', 'Add your vehicle profile before going online.', [
+        { text: 'Set up vehicle', onPress: () => navigate('VehicleProfile') },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+      return;
+    }
+    setOnline(true);
+  };
 
   // Sync online state to Supabase and stream GPS when online
   useEffect(() => {
-    setDriverOnline(online).catch((e) => console.warn('setDriverOnline failed', e));
+    setDriverOnline(online).catch((e: any) => {
+      const msg: string = e?.message ?? '';
+      if (msg.includes('VEHICLE_PROFILE_REQUIRED')) {
+        setOnline(false);
+        Alert.alert('Vehicle required', 'Complete your vehicle profile to go online.', [
+          { text: 'Set up vehicle', onPress: () => navigate('VehicleProfile') },
+          { text: 'Cancel', style: 'cancel' },
+        ]);
+      } else {
+        console.warn('setDriverOnline failed', e);
+      }
+    });
     if (online) {
       startLocationStream();
     } else {
@@ -1262,7 +1288,7 @@ function DriverHomeScreen({ navigate }: NavProp) {
         />
         <View style={{ backgroundColor: RED, paddingHorizontal: 16, paddingBottom: 14 }}>
           <View style={{ flexDirection: 'row', gap: 8 }}>
-            <TouchableOpacity style={[s.toggleBtn, online && s.toggleBtnActive]} onPress={() => { haptic.select(); setOnline(true); }}>
+            <TouchableOpacity style={[s.toggleBtn, online && s.toggleBtnActive]} onPress={() => { haptic.select(); goOnline(); }}>
               <Text style={[s.toggleBtnText, online && { color: RED }]}>ONLINE</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[s.toggleBtn, !online && s.toggleBtnActive]} onPress={() => { haptic.select(); setOnline(false); }}>
@@ -1274,6 +1300,17 @@ function DriverHomeScreen({ navigate }: NavProp) {
           </Text>
         </View>
         <ScrollView contentContainerStyle={{ padding: 16 }}>
+          {!vehicleComplete && (
+            <View style={s.vehicleBanner}>
+              <Text style={s.vehicleBannerText}>🚗 Add your vehicle profile to start driving</Text>
+              <TouchableOpacity
+                style={s.vehicleBannerBtn}
+                onPress={() => navigate('VehicleProfile')}
+              >
+                <Text style={s.vehicleBannerBtnText}>Set up vehicle →</Text>
+              </TouchableOpacity>
+            </View>
+          )}
           <Text style={s.muted}>Today's earnings</Text>
           <Text style={[s.bigTitle, { color: RED }]}>{earningsDisplay}</Text>
           <View style={s.greenPill}>
@@ -2278,6 +2315,7 @@ function DriverEarningsScreen({ navigate }: NavProp) {
 function ProfileScreen({ navigate }: NavProp) {
   const { profile, loading } = useMyProfile();
   const { documents: kycDocs } = useDriverDocuments();
+  const { vehicle, isComplete: vehicleComplete } = useMyVehicle();
   const [email, setEmail] = useState('');
   const [signingOut, setSigningOut] = useState(false);
 
@@ -2348,7 +2386,20 @@ function ProfileScreen({ navigate }: NavProp) {
           <TouchableOpacity style={s.outlineBtn} onPress={() => navigate('Onboarding')}>
             <Text style={s.outlineBtnText}>Switch role / back to role picker</Text>
           </TouchableOpacity>
-          {profile?.role === 'driver' && (
+          {(profile?.role === 'driver' || profile?.role === 'both') && (
+            <TouchableOpacity
+              style={[s.outlineBtn, { marginTop: 8 }]}
+              onPress={() => navigate('VehicleProfile')}
+            >
+              <Text style={s.outlineBtnText}>Vehicle profile</Text>
+              <Text style={[s.muted, { textAlign: 'center', marginTop: 2 }]}>
+                {vehicleComplete && vehicle
+                  ? `${vehicle.vehicle_make} ${vehicle.vehicle_model} ${vehicle.vehicle_year} — ${vehicle.vehicle_total_seats} seats`
+                  : 'Add your car to start driving'}
+              </Text>
+            </TouchableOpacity>
+          )}
+          {(profile?.role === 'driver' || profile?.role === 'both') && (
             <TouchableOpacity
               style={[s.outlineBtn, { marginTop: 8 }]}
               onPress={() => navigate('DriverVerification')}
@@ -2370,6 +2421,126 @@ function ProfileScreen({ navigate }: NavProp) {
           </TouchableOpacity>
         </ScrollView>
         <BottomNav active="Profile" navigate={navigate} mode={mode} />
+      </SafeAreaView>
+    </ScreenTransition>
+  );
+}
+
+// ─── VEHICLE PROFILE ──────────────────────────────────────────
+function VehicleProfileScreen({ navigate }: NavProp) {
+  const { vehicle, loading, refresh } = useMyVehicle();
+  const currentYear = new Date().getFullYear();
+
+  const [make, setMake] = useState('');
+  const [model, setModel] = useState('');
+  const [year, setYear] = useState('');
+  const [color, setColor] = useState('');
+  const [plate, setPlate] = useState('');
+  const [seats, setSeats] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [prefilled, setPrefilled] = useState(false);
+
+  // Prefill from existing vehicle on first load
+  useEffect(() => {
+    if (!loading && vehicle && !prefilled) {
+      setMake(vehicle.vehicle_make ?? '');
+      setModel(vehicle.vehicle_model ?? '');
+      setYear(vehicle.vehicle_year ? String(vehicle.vehicle_year) : '');
+      setColor(vehicle.vehicle_color ?? '');
+      setPlate(vehicle.plate_number ?? '');
+      setSeats(vehicle.vehicle_total_seats ? String(vehicle.vehicle_total_seats) : '');
+      setPrefilled(true);
+    }
+  }, [loading, vehicle]);
+
+  const yearNum = parseInt(year, 10);
+  const seatsNum = parseInt(seats, 10);
+
+  const yearValid = !isNaN(yearNum) && yearNum >= 1990 && yearNum <= currentYear + 1;
+  const seatsValid = !isNaN(seatsNum) && seatsNum >= 1 && seatsNum <= 8;
+  const canSave =
+    make.trim() && model.trim() && year.trim() && color.trim() &&
+    plate.trim() && seats.trim() && yearValid && seatsValid;
+
+  const handleSave = async () => {
+    if (!canSave || saving) return;
+    try {
+      setSaving(true);
+      await saveMyVehicle({
+        make, model, year: yearNum, color, plate, seats: seatsNum,
+      });
+      await refresh();
+      haptic.notify(Haptics.NotificationFeedbackType.Success);
+      Alert.alert('Saved', 'Vehicle profile updated.', [
+        { text: 'OK', onPress: () => navigate('Profile') },
+      ]);
+    } catch (e: any) {
+      haptic.notify(Haptics.NotificationFeedbackType.Error);
+      Alert.alert('Could not save', e?.message ?? 'Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <SafeAreaView style={s.screen}>
+        <TopBar title="Vehicle profile" onBack={() => navigate('Profile')} />
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <ActivityIndicator color={RED} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  const fields: { label: string; value: string; setter: (v: string) => void; placeholder: string; numeric?: boolean; hint?: string }[] = [
+    { label: 'Make', value: make, setter: setMake, placeholder: 'e.g. Toyota' },
+    { label: 'Model', value: model, setter: setModel, placeholder: 'e.g. Camry' },
+    { label: 'Year', value: year, setter: setYear, placeholder: '2018', numeric: true, hint: yearValid || !year ? undefined : 'Enter a year between 1990 and ' + (currentYear + 1) },
+    { label: 'Color', value: color, setter: setColor, placeholder: 'e.g. White' },
+    { label: 'License plate', value: plate, setter: (v) => setPlate(v.toUpperCase()), placeholder: 'ABC 1234' },
+    { label: 'Passenger seats', value: seats, setter: setSeats, placeholder: '4', numeric: true, hint: seatsValid || !seats ? undefined : 'Enter a number between 1 and 8' },
+  ];
+
+  return (
+    <ScreenTransition>
+      <SafeAreaView style={s.screen}>
+        <TopBar title="Vehicle profile" onBack={() => navigate('Profile')} />
+        <ScrollView contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
+          <Text style={[s.muted, { marginBottom: 16 }]}>
+            Complete your vehicle info to go online and accept rides.
+          </Text>
+
+          {fields.map((f) => (
+            <View key={f.label} style={s.vehicleFieldWrap}>
+              <Text style={s.vehicleFieldLabel}>{f.label}</Text>
+              <TextInput
+                style={[s.vehicleFieldInput, f.hint ? { borderColor: AMBER } : undefined]}
+                value={f.value}
+                onChangeText={f.setter}
+                placeholder={f.placeholder}
+                placeholderTextColor="#aaa"
+                keyboardType={f.numeric ? 'number-pad' : 'default'}
+                autoCapitalize={f.numeric ? 'none' : 'words'}
+              />
+              {f.hint ? <Text style={[s.muted, { color: AMBER, marginTop: 2 }]}>{f.hint}</Text> : null}
+            </View>
+          ))}
+
+          <TouchableOpacity
+            style={[s.redBtn, { marginTop: 8, opacity: (!canSave || saving) ? 0.5 : 1 }]}
+            onPress={handleSave}
+            disabled={!canSave || saving}
+          >
+            {saving
+              ? <ActivityIndicator color="white" />
+              : <Text style={s.redBtnText}>Save Vehicle</Text>}
+          </TouchableOpacity>
+
+          <TouchableOpacity style={[s.outlineBtn, { marginTop: 8 }]} onPress={() => navigate('Profile')}>
+            <Text style={s.outlineBtnText}>Cancel</Text>
+          </TouchableOpacity>
+        </ScrollView>
       </SafeAreaView>
     </ScreenTransition>
   );
@@ -2567,6 +2738,7 @@ export default function App() {
     Trips: <TripsScreen navigate={navigate} />,
     Chat: <ChatScreen navigate={navigate} />,
     RateTrip: <RateTripScreen navigate={navigate} />,
+    VehicleProfile: <VehicleProfileScreen navigate={navigate} />,
   };
 
   if (!authChecked) {
@@ -2770,4 +2942,12 @@ const s = StyleSheet.create({
   starRow: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: 8 },
   starIcon: { fontSize: 40 },
   ratingCommentInput: { backgroundColor: '#f5f5f5', borderRadius: 12, padding: 14, fontSize: 14, color: '#111', borderWidth: 0.5, borderColor: '#ddd', minHeight: 90 },
+  // Vehicle profile
+  vehicleBanner: { backgroundColor: RED, borderRadius: 12, padding: 14, marginBottom: 16 },
+  vehicleBannerText: { color: 'white', fontSize: 13, fontWeight: '500', marginBottom: 8 },
+  vehicleBannerBtn: { backgroundColor: 'white', borderRadius: 8, paddingVertical: 8, paddingHorizontal: 14, alignSelf: 'flex-start' },
+  vehicleBannerBtnText: { color: RED, fontSize: 13, fontWeight: '600' },
+  vehicleFieldWrap: { marginBottom: 14 },
+  vehicleFieldLabel: { fontSize: 12, color: '#666', fontWeight: '600', letterSpacing: 0.5, marginBottom: 6, textTransform: 'uppercase' },
+  vehicleFieldInput: { backgroundColor: '#f5f5f5', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 11, fontSize: 15, color: '#111', borderWidth: 0.5, borderColor: '#ddd' },
 });
