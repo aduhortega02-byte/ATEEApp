@@ -477,6 +477,15 @@ function BookScreen({ navigate }: NavProp) {
     })();
   }, [pickupCoords?.lat, pickupCoords?.lng, destinationCoords?.lat, destinationCoords?.lng]);
 
+  // Auto-suggest fare once route is known
+  const [suggestedPrice, setSuggestedPrice] = useState<number | null>(null);
+  useEffect(() => {
+    if (!routeInfo) { setSuggestedPrice(null); return; }
+    const s = Math.max(8, Math.round(5 + routeInfo.distance_mi * 2.5 + routeInfo.eta_min * 0.2));
+    setSuggestedPrice(s);
+    setPrice(s);
+  }, [routeInfo?.distance_mi, routeInfo?.eta_min]);
+
   const onDestChange = (text: string) => {
     setDestination(text);
     setShowSuggestions(text.length > 0);
@@ -499,10 +508,11 @@ function BookScreen({ navigate }: NavProp) {
     setDestinationCoords(coords);
   };
 
-  const priceColor = price >= 42 ? GREEN : price >= 34 ? AMBER : RED;
+  const base = suggestedPrice ?? 40;
+  const priceColor = price >= base ? GREEN : price >= Math.round(base * 0.85) ? AMBER : RED;
   const priceLabel =
-    price >= 42 ? 'Likely to get drivers ✓' :
-    price >= 34 ? 'Might get drivers' :
+    price >= base ? 'Great offer — drivers will accept ✓' :
+    price >= Math.round(base * 0.85) ? 'Might get drivers' :
     'Low — few drivers may accept';
 
   const fillFlex = (price - 1) / 99;
@@ -635,7 +645,9 @@ function BookScreen({ navigate }: NavProp) {
               </TouchableOpacity>
               <View style={{ flex: 1, alignItems: 'center' }}>
                 <Text style={[s.priceStatusLabel, { color: priceColor }]}>{priceLabel}</Text>
-                <Text style={s.priceRec}>Recommended: $42 – $55</Text>
+                <Text style={s.priceRec}>
+                  {suggestedPrice ? `Suggested for this route: $${suggestedPrice}` : 'Higher bid = faster match'}
+                </Text>
               </View>
               <TouchableOpacity
                 style={s.priceBtn}
@@ -802,6 +814,14 @@ function ScheduleScreen({ navigate }: NavProp) {
     })();
   }, [pickupCoords?.lat, pickupCoords?.lng, destinationCoords?.lat, destinationCoords?.lng]);
 
+  const [suggestedPrice, setSuggestedPrice] = useState<number | null>(null);
+  useEffect(() => {
+    if (!routeInfo) { setSuggestedPrice(null); return; }
+    const s = Math.max(8, Math.round(5 + routeInfo.distance_mi * 2.5 + routeInfo.eta_min * 0.2));
+    setSuggestedPrice(s);
+    setPrice(s);
+  }, [routeInfo?.distance_mi, routeInfo?.eta_min]);
+
   const onDestChange = (text: string) => {
     setDestination(text);
     setShowSuggestions(text.length > 0);
@@ -824,10 +844,11 @@ function ScheduleScreen({ navigate }: NavProp) {
     setDestinationCoords(coords);
   };
 
-  const priceColor = price >= 42 ? GREEN : price >= 34 ? AMBER : RED;
+  const base = suggestedPrice ?? 40;
+  const priceColor = price >= base ? GREEN : price >= Math.round(base * 0.85) ? AMBER : RED;
   const priceLabel =
-    price >= 42 ? 'Likely to get drivers ✓' :
-    price >= 34 ? 'Might get drivers' :
+    price >= base ? 'Great offer — drivers will accept ✓' :
+    price >= Math.round(base * 0.85) ? 'Might get drivers' :
     'Low — few drivers may accept';
   const fillFlex = (price - 1) / 99;
 
@@ -956,7 +977,9 @@ function ScheduleScreen({ navigate }: NavProp) {
               </TouchableOpacity>
               <View style={{ flex: 1, alignItems: 'center' }}>
                 <Text style={[s.priceStatusLabel, { color: priceColor }]}>{priceLabel}</Text>
-                <Text style={s.priceRec}>Recommended: $42 – $55</Text>
+                <Text style={s.priceRec}>
+                  {suggestedPrice ? `Suggested for this route: $${suggestedPrice}` : 'Higher bid = faster match'}
+                </Text>
               </View>
               <TouchableOpacity
                 style={s.priceBtn}
