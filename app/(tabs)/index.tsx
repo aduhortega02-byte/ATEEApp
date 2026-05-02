@@ -2953,16 +2953,29 @@ export default function App() {
   const [authChecked, setAuthChecked] = useState(false);
   const [screen, setScreen] = useState<ScreenName>('Onboarding');
   const [rideId, setRideId] = useState<string | null>(null);
+  const [initialRouteDone, setInitialRouteDone] = useState(false);
   const [selectedRide, setSelectedRide] = useState<Ride | null>(null);
   const [chosenBid, setChosenBid] = useState<RideBid | null>(null);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
+    supabase.auth.getSession().then(({ data: { session: s } }) => {
+      setSession(s);
       setAuthChecked(true);
+      // Auto-route returning users to their home screen
+      if (s && !initialRouteDone) {
+        setInitialRouteDone(true);
+        (async () => {
+          try {
+            const { data } = await supabase.from('profiles').select('role').eq('id', s.user.id).maybeSingle();
+            const role = (data as { role: string } | null)?.role;
+            if (role === 'driver') setScreen('DriverHome');
+            else if (role === 'passenger') setScreen('Home');
+          } catch { /* stay on Onboarding */ }
+        })();
+      }
     });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+      setSession(s);
       setAuthChecked(true);
     });
     return () => subscription.unsubscribe();
@@ -2983,7 +2996,7 @@ export default function App() {
     DriverActive: <DriverActiveScreen navigate={navigate} />,
     DriverComplete: <DriverCompleteScreen navigate={navigate} />,
     DriverEarnings: <DriverEarningsScreen navigate={navigate} />,
-    Auth: <AuthScreen onSignedIn={() => navigate('Home')} />,
+    Auth: <AuthScreen onSignedIn={() => navigate('Onboarding')} />,
     Profile: <ProfileScreen navigate={navigate} />,
     DriverVerification: <DriverVerificationScreen navigate={navigate} />,
     Trips: <TripsScreen navigate={navigate} />,
@@ -3001,7 +3014,7 @@ export default function App() {
   }
 
   if (!session) {
-    return <AuthScreen onSignedIn={() => {}} />;
+    return <AuthScreen onSignedIn={() => navigate('Onboarding')} />;
   }
 
   return (
