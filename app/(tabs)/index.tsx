@@ -62,6 +62,7 @@ import { submitRating } from '../../lib/ratings';
 import { saveMyVehicle, isVehicleComplete, formatVehicleDisplay, type VehicleInput } from '../../lib/vehicle';
 import { useMyVehicle } from '../../hooks/useMyVehicle';
 import { useDriverVehicle } from '../../hooks/useDriverVehicle';
+import { useUserProfile } from '../../hooks/useUserProfile';
 import { useChatMessages } from '../../hooks/useChatMessages';
 import { useUnreadChatCount } from '../../hooks/useUnreadChatCount';
 import { Session } from '@supabase/supabase-js';
@@ -1448,6 +1449,7 @@ function DriverHomeScreen({ navigate }: NavProp) {
 function DriverRequestScreen({ navigate }: NavProp) {
   const { selectedRide, setChosenBid } = useContext(RideContext);
   const [accepting, setAccepting] = useState(false);
+  const { profile: passengerProfile } = useUserProfile(selectedRide?.passenger_id);
   const pan = useRef(new Animated.ValueXY()).current;
 
   const handleAccept = async () => {
@@ -1547,10 +1549,14 @@ function DriverRequestScreen({ navigate }: NavProp) {
               {...panResponder.panHandlers}
             >
               <View style={s.driverCardInner}>
-                <View style={[s.avatarCircle, { backgroundColor: RED }]}><Text style={s.avatarText}>P</Text></View>
+                <View style={[s.avatarCircle, { backgroundColor: RED }]}>
+                  <Text style={s.avatarText}>{getInitials(passengerProfile?.full_name ?? undefined)}</Text>
+                </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={s.driverName}>New passenger request</Text>
-                  <Text style={s.muted}>Verified · ETA 5 min to pickup</Text>
+                  <Text style={s.driverName}>{passengerProfile?.full_name ?? 'Passenger'}</Text>
+                  <Text style={s.muted}>
+                    ⭐ {passengerProfile?.rating?.toFixed(1) ?? '5.0'} · {passengerProfile?.total_trips ?? 0} trips
+                  </Text>
                 </View>
               </View>
               <View style={s.divider} />
@@ -1606,6 +1612,7 @@ function DriverActiveScreen({ navigate }: NavProp) {
   const [showPayConfirm, setShowPayConfirm] = useState(false);
   const unreadCount = useUnreadChatCount(selectedRide?.id ?? null);
   const { status: liveStatus } = useRideStatus(selectedRide?.id ?? null);
+  const { profile: passengerProfile } = useUserProfile(selectedRide?.passenger_id);
 
   // Detect passenger cancellation
   useEffect(() => {
@@ -1727,10 +1734,14 @@ function DriverActiveScreen({ navigate }: NavProp) {
         <ScrollView contentContainerStyle={{ padding: 16 }}>
           <View style={s.card}>
             <View style={s.driverCardInner}>
-              <View style={[s.avatarCircle, { backgroundColor: RED }]}><Text style={s.avatarText}>P</Text></View>
+              <View style={[s.avatarCircle, { backgroundColor: RED }]}>
+                <Text style={s.avatarText}>{getInitials(passengerProfile?.full_name ?? undefined)}</Text>
+              </View>
               <View style={{ flex: 1 }}>
-                <Text style={s.driverName}>Passenger</Text>
-                <Text style={s.muted}>Pickup in progress</Text>
+                <Text style={s.driverName}>{passengerProfile?.full_name ?? 'Passenger'}</Text>
+                <Text style={s.muted}>
+                  ⭐ {passengerProfile?.rating?.toFixed(1) ?? '5.0'} · Pickup in progress
+                </Text>
               </View>
               <Text style={[s.tripPrice, { color: RED }]}>${selectedRide.offered_price.toFixed(2)}</Text>
             </View>
