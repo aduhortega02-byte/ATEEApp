@@ -50,6 +50,7 @@ import { useDriverQueue } from '../../hooks/useDriverQueue';
 import { useDriverTodayStats } from '../../hooks/useDriverTodayStats';
 import { useDriverWallet } from '../../hooks/useDriverWallet';
 import { useMyProfile } from '../../hooks/useMyProfile';
+import { updateMyProfile } from '../../lib/profile';
 import { usePassengerRecentRides } from '../../hooks/usePassengerRecentRides';
 import { useRideBids } from '../../hooks/useRideBids';
 import { useRideStatus } from '../../hooks/useRideStatus';
@@ -403,7 +404,9 @@ function HomeScreen({ navigate }: NavProp) {
           </TouchableOpacity>
           <View style={s.rowBetween}>
             <Text style={s.sectionTitle}>Recent Trips</Text>
-            <Text style={s.seeAll}>See All</Text>
+            <TouchableOpacity onPress={() => navigate('Trips')}>
+              <Text style={s.seeAll}>See All</Text>
+            </TouchableOpacity>
           </View>
           {ridesLoading ? (
             <><SkeletonCard /><SkeletonCard /></>
@@ -2069,19 +2072,8 @@ function RateTripScreen({ navigate }: NavProp) {
   const [stars, setStars] = useState(5);
   const [comment, setComment] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [driverName, setDriverName] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!ride?.driver_id) return;
-    supabase
-      .from('profiles')
-      .select('full_name')
-      .eq('id', ride.driver_id)
-      .single()
-      .then(({ data }) => {
-        if (data) setDriverName((data as { full_name: string | null }).full_name);
-      });
-  }, [ride?.driver_id]);
+  const { profile: driverProfile } = useUserProfile(ride?.driver_id);
+  const driverName = driverProfile?.full_name ?? null;
 
   const finish = () => {
     setRideId(null);
@@ -2432,6 +2424,9 @@ function ProfileScreen({ navigate }: NavProp) {
   const { vehicle, isComplete: vehicleComplete } = useMyVehicle();
   const [email, setEmail] = useState('');
   const [signingOut, setSigningOut] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameInput, setNameInput] = useState('');
+  const [savingName, setSavingName] = useState(false);
 
   const kycApprovedCount = kycDocs.filter(
     (d) =>
@@ -2454,6 +2449,25 @@ function ProfileScreen({ navigate }: NavProp) {
     } catch (e) {
       console.warn('[ProfileScreen] signOut failed', e);
       setSigningOut(false);
+    }
+  };
+
+  const startEditName = () => {
+    setNameInput(profile?.full_name ?? '');
+    setEditingName(true);
+  };
+
+  const saveName = async () => {
+    const trimmed = nameInput.trim();
+    if (!trimmed) return;
+    try {
+      setSavingName(true);
+      await updateMyProfile({ full_name: trimmed });
+    } catch (e) {
+      Alert.alert('Error', 'Could not save name. Please try again.');
+    } finally {
+      setSavingName(false);
+      setEditingName(false);
     }
   };
 
@@ -2485,16 +2499,46 @@ function ProfileScreen({ navigate }: NavProp) {
             <View style={s.card}>
               <View style={[s.rowBetween, { paddingVertical: 6, borderBottomWidth: 0.5, borderColor: '#eee' }]}>
                 <Text style={s.muted}>Name</Text>
-                <Text style={s.driverName}>{profile?.full_name ?? '—'}</Text>
+                {editingName ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1, justifyContent: 'flex-end' }}>
+                    <TextInput
+                      value={nameInput}
+                      onChangeText={setNameInput}
+                      style={{ borderBottomWidth: 1, borderColor: RED, fontSize: 14, minWidth: 120, textAlign: 'right', paddingVertical: 2 }}
+                      autoFocus
+                      returnKeyType="done"
+                      onSubmitEditing={saveName}
+                    />
+                    <TouchableOpacity onPress={saveName} disabled={savingName}>
+                      {savingName ? <ActivityIndicator size="small" color={RED} /> : <Text style={{ color: RED, fontWeight: '600' }}>Save</Text>}
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => setEditingName(false)}>
+                      <Text style={s.muted}>Cancel</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }} onPress={startEditName}>
+                    <Text style={s.driverName}>{profile?.full_name ?? '—'}</Text>
+                    <Ionicons name="pencil" size={12} color="#aaa" />
+                  </TouchableOpacity>
+                )}
               </View>
               <View style={[s.rowBetween, { paddingVertical: 6, borderBottomWidth: 0.5, borderColor: '#eee' }]}>
                 <Text style={s.muted}>Email</Text>
                 <Text style={s.driverName}>{email || '—'}</Text>
               </View>
-              <View style={[s.rowBetween, { paddingVertical: 6 }]}>
+              <View style={[s.rowBetween, { paddingVertical: 6, borderBottomWidth: (profile?.role === 'driver' || profile?.role === 'both') ? 0.5 : 0, borderColor: '#eee' }]}>
                 <Text style={s.muted}>Role</Text>
                 <Text style={s.driverName}>{profile?.role ?? '—'}</Text>
               </View>
+              {(profile?.role === 'driver' || profile?.role === 'both') && (
+                <View style={[s.rowBetween, { paddingVertical: 6 }]}>
+                  <Text style={s.muted}>Driver rating</Text>
+                  <Text style={s.driverName}>
+                    ⭐ {profile?.rating?.toFixed(1) ?? '—'} · {profile?.total_trips ?? 0} trips
+                  </Text>
+                </View>
+              )}
             </View>
           )}
           <TouchableOpacity style={s.outlineBtn} onPress={() => navigate('Onboarding')}>

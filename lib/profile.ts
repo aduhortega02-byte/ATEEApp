@@ -11,6 +11,16 @@ export async function fetchProfileById(userId: string): Promise<Pick<Profile, 'i
   return data as Pick<Profile, 'id' | 'full_name' | 'rating' | 'total_trips'> | null;
 }
 
+export async function updateMyProfile(fields: { full_name?: string }): Promise<void> {
+  const { data: u } = await supabase.auth.getUser();
+  if (!u.user) throw new Error('Not authenticated');
+  const { error } = await supabase
+    .from('profiles')
+    .update(fields)
+    .eq('id', u.user.id);
+  if (error) throw error;
+}
+
 export async function fetchMyProfile(): Promise<Profile | null> {
   const { data: user } = await supabase.auth.getUser();
   if (!user.user) return null;
