@@ -1156,6 +1156,22 @@ function ConfirmedScreen({ navigate }: NavProp) {
     }
   }, [status]);
 
+  const handleCancelRide = () => {
+    const doCancel = async () => {
+      try { if (rideId) await cancelRide(rideId); } catch (e) { console.warn('cancel failed', e); }
+      setRideId(null);
+      navigate('Home');
+    };
+    if (Platform.OS === 'web') {
+      if ((globalThis as any).confirm('Cancel your ride?')) doCancel();
+    } else {
+      Alert.alert('Cancel ride?', 'Your driver will be notified.', [
+        { text: 'Keep ride', style: 'cancel' },
+        { text: 'Cancel ride', style: 'destructive', onPress: doCancel },
+      ]);
+    }
+  };
+
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
   const timerLabel = seconds > 0 ? `${mins}:${secs.toString().padStart(2, '0')}` : 'Arriving now! 🎉';
@@ -1227,7 +1243,7 @@ function ConfirmedScreen({ navigate }: NavProp) {
               <View style={s.driverCardInner}>
                 <DriverAvatar
                   driverId={ride.driver_id}
-                  initials="DR"
+                  initials={getInitials(driverName ?? undefined)}
                   size={48}
                 />
                 <View style={{ flex: 1 }}>
@@ -1252,9 +1268,16 @@ function ConfirmedScreen({ navigate }: NavProp) {
               </View>
             ))}
           </View>
-          <TouchableOpacity style={s.redBtn} onPress={() => { setRideId(null); navigate('Home'); }}>
-            <Text style={s.redBtnText}>Done</Text>
-          </TouchableOpacity>
+          {status !== 'in_progress' && status !== 'completed' && (
+            <TouchableOpacity style={s.outlineBtn} onPress={handleCancelRide}>
+              <Text style={[s.outlineBtnText, { color: RED }]}>Cancel Ride</Text>
+            </TouchableOpacity>
+          )}
+          {status === 'completed' && (
+            <TouchableOpacity style={s.redBtn} onPress={() => { setRideId(null); navigate('Home'); }}>
+              <Text style={s.redBtnText}>Done</Text>
+            </TouchableOpacity>
+          )}
         </ScrollView>
       </SafeAreaView>
     </ScreenTransition>
@@ -1555,10 +1578,30 @@ function DriverRequestScreen({ navigate }: NavProp) {
 
 // ─── DRIVER ACTIVE ────────────────────────────────────────────
 function DriverActiveScreen({ navigate }: NavProp) {
-  const { selectedRide } = useContext(RideContext);
+  const { selectedRide, setSelectedRide } = useContext(RideContext);
   const [loading, setLoading] = useState(false);
   const [showPayConfirm, setShowPayConfirm] = useState(false);
   const unreadCount = useUnreadChatCount(selectedRide?.id ?? null);
+  const { status: liveStatus } = useRideStatus(selectedRide?.id ?? null);
+
+  // Detect passenger cancellation
+  useEffect(() => {
+    if (liveStatus === 'cancelled') {
+      haptic.notify(Haptics.NotificationFeedbackType.Warning);
+      if (Platform.OS === 'web') {
+        (globalThis as any).alert('The passenger cancelled the trip.');
+        setSelectedRide(null);
+        navigate('DriverHome');
+      } else {
+        Alert.alert('Trip Cancelled', 'The passenger cancelled this trip.', [
+          {
+            text: 'OK',
+            onPress: () => { setSelectedRide(null); navigate('DriverHome'); },
+          },
+        ]);
+      }
+    }
+  }, [liveStatus]);
 
   const handleBackToOnboarding = () => {
     if (selectedRide) {
