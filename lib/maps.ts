@@ -4,6 +4,21 @@ const API_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY;
 
 export type LatLng = { lat: number; lng: number };
 
+export function haversineDistanceMi(a: LatLng, b: LatLng): number {
+  const R = 3959; // Earth radius in miles
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const sinDLat = Math.sin(dLat / 2);
+  const sinDLng = Math.sin(dLng / 2);
+  const x =
+    sinDLat * sinDLat +
+    Math.cos((a.lat * Math.PI) / 180) *
+      Math.cos((b.lat * Math.PI) / 180) *
+      sinDLng *
+      sinDLng;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+
 export type PlacePrediction = {
   place_id: string;
   description: string;

@@ -25,6 +25,7 @@ import { getCurrentPosition } from '../../lib/geolocation';
 import {
   geocodePlace,
   getRouteInfo,
+  haversineDistanceMi,
   reverseGeocode,
   searchPlaces,
   type LatLng,
@@ -1312,12 +1313,30 @@ function ConfirmedScreen({ navigate }: NavProp) {
 }
 
 // ─── DRIVER HOME (live queue from Realtime) ───────────────────
+const NEARBY_RADIUS_MI = 25;
+
 function DriverHomeScreen({ navigate }: NavProp) {
   const { setSelectedRide } = useContext(RideContext);
   const [online, setOnline] = useState(false);
-  const { rides } = useDriverQueue(online);
+  const { rides: allRides } = useDriverQueue(online);
   const { stats: todayStats } = useDriverTodayStats();
   const { isComplete: vehicleComplete } = useMyVehicle();
+  const [driverCoords, setDriverCoords] = useState<LatLng | null>(null);
+
+  // Get driver's location once on mount for proximity filtering
+  useEffect(() => {
+    getCurrentPosition().then((r) => {
+      if (r.status === 'ok') setDriverCoords(r.coords);
+    });
+  }, []);
+
+  // Filter rides to within 25 miles of driver's current location
+  const rides = driverCoords
+    ? allRides.filter((r) => {
+        if (!r.pickup_lat || !r.pickup_lng) return true; // no coords = include
+        return haversineDistanceMi(driverCoords, { lat: r.pickup_lat, lng: r.pickup_lng }) <= NEARBY_RADIUS_MI;
+      })
+    : allRides;
 
   const goOnline = () => {
     if (!vehicleComplete) {
