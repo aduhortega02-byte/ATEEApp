@@ -1375,7 +1375,6 @@ function DriverHomeScreen({ navigate }: NavProp) {
     return () => { stopLocationStream(); };
   }, []);
 
-  const topRide = rides[0];
   const earningsDisplay = `$${(todayStats.earningsCents / 100).toFixed(2)}`;
   const stats: [string, string][] = [
     ['Active Time', '—'],
@@ -1871,6 +1870,7 @@ function DriverActiveScreen({ navigate }: NavProp) {
 // ─── DRIVER COMPLETE ──────────────────────────────────────────
 function DriverCompleteScreen({ navigate }: NavProp) {
   const { selectedRide, setSelectedRide, setChosenBid } = useContext(RideContext);
+  const { profile: passengerProfile } = useUserProfile(selectedRide?.passenger_id);
 
   useEffect(() => {
     if (selectedRide) haptic.notify(Haptics.NotificationFeedbackType.Success);
@@ -1910,8 +1910,37 @@ function DriverCompleteScreen({ navigate }: NavProp) {
         </View>
         <ScrollView contentContainerStyle={{ padding: 16 }}>
           <View style={s.card}>
-            <Text style={s.muted}>Rate your passenger</Text>
-            <Text style={{ fontSize: 28, marginTop: 8, textAlign: 'center' }}>⭐⭐⭐⭐⭐</Text>
+            <Text style={[s.sectionTitle, { marginBottom: 10 }]}>Trip Summary</Text>
+            {passengerProfile?.full_name ? (
+              <View style={[s.rowBetween, { paddingVertical: 5, borderBottomWidth: 0.5, borderColor: '#eee' }]}>
+                <Text style={s.muted}>Passenger</Text>
+                <Text style={s.driverName}>{passengerProfile.full_name}</Text>
+              </View>
+            ) : null}
+            <View style={[s.rowBetween, { paddingVertical: 5, borderBottomWidth: 0.5, borderColor: '#eee' }]}>
+              <Text style={s.muted}>From</Text>
+              <Text style={[s.driverName, { flex: 1, textAlign: 'right', marginLeft: 12 }]} numberOfLines={1}>
+                {selectedRide.pickup_address}
+              </Text>
+            </View>
+            <View style={[s.rowBetween, { paddingVertical: 5, borderBottomWidth: 0.5, borderColor: '#eee' }]}>
+              <Text style={s.muted}>To</Text>
+              <Text style={[s.driverName, { flex: 1, textAlign: 'right', marginLeft: 12 }]} numberOfLines={1}>
+                {selectedRide.destination_address}
+              </Text>
+            </View>
+            {selectedRide.distance_mi != null && (
+              <View style={[s.rowBetween, { paddingVertical: 5, borderBottomWidth: 0.5, borderColor: '#eee' }]}>
+                <Text style={s.muted}>Distance</Text>
+                <Text style={s.driverName}>{selectedRide.distance_mi} mi</Text>
+              </View>
+            )}
+            <View style={[s.rowBetween, { paddingVertical: 5 }]}>
+              <Text style={s.muted}>Payment</Text>
+              <Text style={s.driverName}>
+                {selectedRide.payment_method === 'etransfer' ? '📱 E-transfer' : '💵 Cash'}
+              </Text>
+            </View>
           </View>
           <TouchableOpacity style={s.redBtn} onPress={() => finish('DriverEarnings')}>
             <Text style={s.redBtnText}>View Earnings</Text>
