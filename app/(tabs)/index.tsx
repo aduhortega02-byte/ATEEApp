@@ -59,8 +59,9 @@ import { fetchRecentRidesForPassenger, fetchDriverRides } from '../../lib/passen
 import type { Ride as RideType } from '../../lib/types';
 import { sendTextMessage, sendLocationMessage, sendQuickReply, type ChatMessage } from '../../lib/chat';
 import { submitRating } from '../../lib/ratings';
-import { saveMyVehicle, isVehicleComplete, type VehicleInput } from '../../lib/vehicle';
+import { saveMyVehicle, isVehicleComplete, formatVehicleDisplay, type VehicleInput } from '../../lib/vehicle';
 import { useMyVehicle } from '../../hooks/useMyVehicle';
+import { useDriverVehicle } from '../../hooks/useDriverVehicle';
 import { useChatMessages } from '../../hooks/useChatMessages';
 import { useUnreadChatCount } from '../../hooks/useUnreadChatCount';
 import { Session } from '@supabase/supabase-js';
@@ -1013,6 +1014,56 @@ function ScheduleScreen({ navigate }: NavProp) {
   );
 }
 
+// ─── DRIVER BID ROW (needs its own component so hooks can run per bid) ────
+function DriverBidRow({
+  bid,
+  idx,
+  colors,
+  choosing,
+  onPress,
+}: {
+  bid: RideBid;
+  idx: number;
+  colors: string[];
+  choosing: string | null;
+  onPress: () => void;
+}) {
+  const name = bid.driver?.full_name || 'Driver';
+  const rating = bid.driver?.rating?.toFixed(1) ?? '5.0';
+  const trips = bid.driver?.total_trips ?? 0;
+  const { displayString } = useDriverVehicle(bid.driver_id);
+
+  return (
+    <TouchableOpacity
+      style={[s.driverRow, { opacity: choosing && choosing !== bid.driver_id ? 0.4 : 1 }]}
+      onPress={onPress}
+      disabled={!!choosing}
+    >
+      <DriverAvatar
+        driverId={bid.driver_id}
+        initials={getInitials(name)}
+        background={colors[idx % colors.length]}
+      />
+      <View style={{ flex: 1 }}>
+        <Text style={s.driverName}>{name}</Text>
+        {displayString ? (
+          <Text style={[s.muted, { marginBottom: 1 }]}>{displayString}</Text>
+        ) : null}
+        <Text style={s.muted}>⭐ {rating} · {trips} trips · Verified</Text>
+      </View>
+      <View style={{ alignItems: 'flex-end' }}>
+        {choosing === bid.driver_id
+          ? <ActivityIndicator color={RED} />
+          : <>
+              <Text style={[s.tripPrice, { color: RED }]}>ETA {bid.eta_min}m</Text>
+              <View style={s.greenBadge}><Text style={s.greenBadgeText}>100% fare</Text></View>
+            </>
+        }
+      </View>
+    </TouchableOpacity>
+  );
+}
+
 // ─── DRIVERS (passenger picks a driver from live bids) ────────
 function DriversScreen({ navigate }: NavProp) {
   const { rideId } = useContext(RideContext);
@@ -1058,38 +1109,16 @@ function DriversScreen({ navigate }: NavProp) {
               <Text style={s.muted}>
                 {bids.length} driver{bids.length > 1 ? 's' : ''} accepted your price
               </Text>
-              {bids.map((bid, i) => {
-                const name = bid.driver?.full_name || 'Driver';
-                const rating = bid.driver?.rating?.toFixed(1) ?? '5.0';
-                const trips = bid.driver?.total_trips ?? 0;
-                return (
-                  <TouchableOpacity
-                    key={bid.id}
-                    style={[s.driverRow, { opacity: choosing && choosing !== bid.driver_id ? 0.4 : 1 }]}
-                    onPress={() => pick(bid.driver_id)}
-                    disabled={!!choosing}
-                  >
-                    <DriverAvatar
-                      driverId={bid.driver_id}
-                      initials={getInitials(name)}
-                      background={colors[i % colors.length]}
-                    />
-                    <View style={{ flex: 1 }}>
-                      <Text style={s.driverName}>{name}</Text>
-                      <Text style={s.muted}>⭐ {rating} · {trips} trips · Verified</Text>
-                    </View>
-                    <View style={{ alignItems: 'flex-end' }}>
-                      {choosing === bid.driver_id
-                        ? <ActivityIndicator color={RED} />
-                        : <>
-                            <Text style={[s.tripPrice, { color: RED }]}>ETA {bid.eta_min}m</Text>
-                            <View style={s.greenBadge}><Text style={s.greenBadgeText}>100% fare</Text></View>
-                          </>
-                      }
-                    </View>
-                  </TouchableOpacity>
-                );
-              })}
+              {bids.map((bid, i) => (
+                <DriverBidRow
+                  key={bid.id}
+                  bid={bid}
+                  idx={i}
+                  colors={colors}
+                  choosing={choosing}
+                  onPress={() => pick(bid.driver_id)}
+                />
+              ))}
               <TouchableOpacity style={s.outlineBtn} onPress={() => navigate('Book')}>
                 <Text style={s.outlineBtnText}>Change Price</Text>
               </TouchableOpacity>
@@ -1108,6 +1137,7 @@ function ConfirmedScreen({ navigate }: NavProp) {
   const { ride, status } = useRideStatus(rideId);
   const driverCoords = useDriverLocation(ride?.driver_id ?? null);
   const unreadCount = useUnreadChatCount(rideId);
+  const { driverName, displayString: vehicleDisplay, seats: vehicleSeats } = useDriverVehicle(ride?.driver_id);
   const [seconds, setSeconds] = useState(272);
 
   useEffect(() => {
@@ -1201,8 +1231,15 @@ function ConfirmedScreen({ navigate }: NavProp) {
                   size={48}
                 />
                 <View style={{ flex: 1 }}>
-                  <Text style={s.driverName}>Your Driver</Text>
-                  <Text style={s.muted}>On the way to you</Text>
+                  <Text style={s.driverName}>{driverName ?? 'Your Driver'}</Text>
+                  {vehicleDisplay ? (
+                    <Text style={s.muted}>{vehicleDisplay}</Text>
+                  ) : null}
+                  {vehicleSeats ? (
+                    <Text style={s.muted}>{vehicleSeats} seats available</Text>
+                  ) : (
+                    <Text style={s.muted}>On the way to you</Text>
+                  )}
                 </View>
               </View>
             </View>

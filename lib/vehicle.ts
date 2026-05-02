@@ -45,6 +45,26 @@ export async function fetchMyVehicle(): Promise<Vehicle | null> {
   return (data as Vehicle) ?? null;
 }
 
+export async function fetchVehicleByDriverId(driverId: string): Promise<Vehicle | null> {
+  const { data, error } = await supabase
+    .from('drivers')
+    .select(
+      'vehicle_make, vehicle_model, vehicle_year, vehicle_color, plate_number, vehicle_total_seats, vehicle_updated_at',
+    )
+    .eq('user_id', driverId)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as Vehicle) ?? null;
+}
+
+export function formatVehicleDisplay(v: Vehicle | null | undefined): string | null {
+  if (!v || !v.vehicle_make || !v.vehicle_model) return null;
+  const parts: string[] = [`${v.vehicle_make} ${v.vehicle_model}`];
+  if (v.vehicle_year) parts[0] += ` ${v.vehicle_year}`;
+  if (v.vehicle_color) parts.push(v.vehicle_color);
+  return parts.join(' · ');
+}
+
 export async function saveMyVehicle(v: VehicleInput): Promise<Vehicle> {
   const { data: u } = await supabase.auth.getUser();
   if (!u.user) throw new Error('Not authenticated');
