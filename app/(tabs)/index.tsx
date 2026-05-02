@@ -1412,34 +1412,47 @@ function DriverHomeScreen({ navigate }: NavProp) {
             ))}
           </View>
           <View style={s.rowBetween}>
-            <Text style={s.sectionTitle}>Active Request</Text>
-            <View style={s.redBadge}>
-              <Text style={s.redBadgeText}>{rides.length} Available</Text>
-            </View>
-          </View>
-          {topRide ? (
-            <TouchableOpacity style={s.card} onPress={() => { setSelectedRide(topRide); navigate('DriverRequest'); }}>
-              <View style={s.driverCardInner}>
-                <View style={[s.avatarCircle, { backgroundColor: RED }]}><Text style={s.avatarText}>?</Text></View>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.driverName}>New ride request</Text>
-                  <Text style={s.muted}>{topRide.distance_mi ?? '—'} mi · {topRide.eta_min ?? '—'} min</Text>
-                </View>
-                <Text style={[s.tripPrice, { color: RED }]}>${topRide.offered_price.toFixed(2)}</Text>
+            <Text style={s.sectionTitle}>Nearby Requests</Text>
+            {rides.length > 0 && (
+              <View style={s.redBadge}>
+                <Text style={s.redBadgeText}>{rides.length} Available</Text>
               </View>
-              <Text style={s.muted} numberOfLines={1}>
-                {topRide.pickup_address} → {topRide.destination_address}
-              </Text>
-              <TouchableOpacity style={[s.redBtn, { marginTop: 10 }]} onPress={() => { setSelectedRide(topRide); navigate('DriverRequest'); }}>
-                <Text style={s.redBtnText}>See More Details</Text>
-              </TouchableOpacity>
-            </TouchableOpacity>
-          ) : (
+            )}
+          </View>
+          {rides.length === 0 ? (
             <View style={[s.card, { alignItems: 'center', paddingVertical: 24 }]}>
               <Text style={s.muted}>
                 {online ? 'Waiting for new requests…' : 'Go online to see requests'}
               </Text>
             </View>
+          ) : (
+            rides.map((ride) => (
+              <TouchableOpacity
+                key={ride.id}
+                style={s.card}
+                onPress={() => { setSelectedRide(ride); navigate('DriverRequest'); }}
+              >
+                <View style={s.driverCardInner}>
+                  <View style={[s.avatarCircle, { backgroundColor: RED }]}>
+                    <Text style={s.avatarText}>$</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.driverName} numberOfLines={1}>
+                      {ride.pickup_address}
+                    </Text>
+                    <Text style={s.muted} numberOfLines={1}>→ {ride.destination_address}</Text>
+                    <Text style={[s.muted, { marginTop: 2 }]}>
+                      {ride.distance_mi ?? '—'} mi · {ride.eta_min ?? '—'} min
+                      {ride.scheduled_for ? ` · 🗓 Scheduled` : ''}
+                    </Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={[s.tripPrice, { color: RED }]}>${ride.offered_price.toFixed(2)}</Text>
+                    <Text style={[s.muted, { fontSize: 10 }]}>{ride.payment_method === 'etransfer' ? '📱' : '💵'}</Text>
+                  </View>
+                </View>
+              </TouchableOpacity>
+            ))
           )}
         </ScrollView>
         <BottomNav active="Home" navigate={navigate} mode="driver" />
@@ -1453,6 +1466,22 @@ function DriverRequestScreen({ navigate }: NavProp) {
   const { selectedRide, setChosenBid } = useContext(RideContext);
   const [accepting, setAccepting] = useState(false);
   const { profile: passengerProfile } = useUserProfile(selectedRide?.passenger_id);
+  const { status: rideStatus } = useRideStatus(selectedRide?.id ?? null);
+
+  // If passenger cancels while driver is viewing the request
+  useEffect(() => {
+    if (rideStatus === 'cancelled') {
+      haptic.notify(Haptics.NotificationFeedbackType.Warning);
+      if (Platform.OS === 'web') {
+        (globalThis as any).alert('This ride was cancelled by the passenger.');
+        navigate('DriverHome');
+      } else {
+        Alert.alert('Ride Cancelled', 'The passenger cancelled this request.', [
+          { text: 'OK', onPress: () => navigate('DriverHome') },
+        ]);
+      }
+    }
+  }, [rideStatus]);
   const pan = useRef(new Animated.ValueXY()).current;
 
   const handleAccept = async () => {
