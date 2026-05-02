@@ -1489,7 +1489,23 @@ function DriverRequestScreen({ navigate }: NavProp) {
     try {
       setAccepting(true);
       haptic.notify(Haptics.NotificationFeedbackType.Success);
-      const bid = await acceptRide(selectedRide.id, 5); // 5 min ETA placeholder
+
+      // Calculate real ETA from driver's current location to pickup
+      let etaMin = 5;
+      if (selectedRide.pickup_lat && selectedRide.pickup_lng) {
+        try {
+          const pos = await getCurrentPosition();
+          if (pos.status === 'ok') {
+            const route = await getRouteInfo(pos.coords, {
+              lat: selectedRide.pickup_lat,
+              lng: selectedRide.pickup_lng,
+            });
+            if (route) etaMin = route.eta_min;
+          }
+        } catch { /* fall back to 5 min */ }
+      }
+
+      const bid = await acceptRide(selectedRide.id, etaMin);
       setChosenBid(bid);
       navigate('DriverActive');
     } catch (e: any) {
