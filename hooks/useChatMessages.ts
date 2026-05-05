@@ -1,10 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { fetchMessagesForRide, markMessagesRead, type ChatMessage } from '../lib/chat';
 
-export function useChatMessages(rideId: string | null) {
+export function useChatMessages(rideId: string | null, onNewMessage?: (msg: ChatMessage) => void) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
+  const onNewMessageRef = useRef(onNewMessage);
+
+  useEffect(() => {
+    onNewMessageRef.current = onNewMessage;
+  }, [onNewMessage]);
 
   useEffect(() => {
     if (!rideId) { setMessages([]); setLoading(false); return; }
@@ -30,6 +35,7 @@ export function useChatMessages(rideId: string | null) {
           if (!cancelled) {
             setMessages((prev) => [...prev, payload.new]);
             markMessagesRead(rideId).catch(() => {});
+            onNewMessageRef.current?.(payload.new);
           }
         },
       )

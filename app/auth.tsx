@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   KeyboardAvoidingView,
   Platform,
   SafeAreaView,
@@ -25,11 +26,49 @@ export default function AuthScreen({ onSignedIn }: Props) {
   const [fullName, setFullName] = useState('');
   const [role, setRole] = useState<'passenger' | 'driver'>('passenger');
   const [loading, setLoading] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const switchMode = (next: 'signin' | 'signup') => {
     setMode(next);
     setError(null);
+  };
+
+  const handleForgotPassword = async () => {
+    const doReset = async (addr: string) => {
+      try {
+        setResetLoading(true);
+        const { error: err } = await supabase.auth.resetPasswordForEmail(addr.trim(), {
+          redirectTo: 'https://example.com/reset',
+        });
+        if (err) throw err;
+        if (Platform.OS === 'web') {
+          (globalThis as any).alert(`Password reset link sent to ${addr.trim()}`);
+        } else {
+          Alert.alert('Check your email', `A reset link was sent to ${addr.trim()}`);
+        }
+      } catch (e: any) {
+        setError(e.message ?? 'Could not send reset email');
+      } finally {
+        setResetLoading(false);
+      }
+    };
+
+    if (email.trim()) {
+      doReset(email.trim());
+      return;
+    }
+
+    if (Platform.OS === 'web') {
+      const addr = (globalThis as any).prompt('Enter your email address to reset your password');
+      if (addr) doReset(addr);
+    } else if (Platform.OS === 'ios') {
+      Alert.prompt('Reset Password', 'Enter your email address', (addr) => {
+        if (addr) doReset(addr);
+      });
+    } else {
+      Alert.alert('Reset Password', 'Enter your email in the field above, then tap Forgot password?');
+    }
   };
 
   const submit = async () => {
@@ -146,6 +185,18 @@ export default function AuthScreen({ onSignedIn }: Props) {
                 onChangeText={setPassword}
                 secureTextEntry
               />
+
+              {mode === 'signin' && (
+                <TouchableOpacity
+                  style={{ alignSelf: 'flex-end', marginTop: 6 }}
+                  onPress={handleForgotPassword}
+                  disabled={resetLoading}
+                >
+                  <Text style={{ fontSize: 12, color: '#c0392b' }}>
+                    {resetLoading ? 'Sending…' : 'Forgot password?'}
+                  </Text>
+                </TouchableOpacity>
+              )}
 
               {error ? <Text style={s.error}>{error}</Text> : null}
 

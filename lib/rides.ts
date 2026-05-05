@@ -26,6 +26,7 @@ export async function createRide(params: {
   eta_min?: number;
   scheduled_for?: string;
   payment_method: PaymentMethod;
+  passenger_note?: string | null;
 }): Promise<Ride> {
   const { data: user } = await supabase.auth.getUser();
   if (!user.user) throw new Error('Not authenticated');

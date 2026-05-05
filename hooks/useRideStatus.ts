@@ -1,20 +1,24 @@
-// hooks/useRideStatus.ts
-// Subscribes to a single ride's status changes. Used on Matching/Confirmed
-// screens so the passenger auto-advances when the ride moves through states.
-
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { Ride, RideStatus } from '../lib/rides';
 
-export function useRideStatus(rideId: string | null) {
+export function useRideStatus(
+  rideId: string | null,
+  onStatusChange?: (status: RideStatus, ride: Ride) => void,
+) {
   const [ride, setRide] = useState<Ride | null>(null);
   const [status, setStatus] = useState<RideStatus | null>(null);
+  const prevStatusRef = useRef<RideStatus | null>(null);
+  const onStatusChangeRef = useRef(onStatusChange);
+
+  useEffect(() => {
+    onStatusChangeRef.current = onStatusChange;
+  }, [onStatusChange]);
 
   useEffect(() => {
     if (!rideId) return;
     let cancelled = false;
 
-    // Initial fetch
     (async () => {
       const { data, error } = await supabase
         .from('rides')
@@ -22,12 +26,13 @@ export function useRideStatus(rideId: string | null) {
         .eq('id', rideId)
         .single();
       if (!error && !cancelled && data) {
-        setRide(data as Ride);
-        setStatus((data as Ride).status);
+        const r = data as Ride;
+        setRide(r);
+        setStatus(r.status);
+        prevStatusRef.current = r.status;
       }
     })();
 
-    // Realtime
     const channel = supabase
       .channel(`ride-${rideId}`)
       .on(
@@ -38,8 +43,12 @@ export function useRideStatus(rideId: string | null) {
           if (!cancelled) {
             setRide(r);
             setStatus(r.status);
+            if (r.status !== prevStatusRef.current) {
+              onStatusChangeRef.current?.(r.status, r);
+              prevStatusRef.current = r.status;
+            }
           }
-        }
+        },
       )
       .subscribe();
 

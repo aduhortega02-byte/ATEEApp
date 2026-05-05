@@ -1,7 +1,7 @@
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -20,6 +20,7 @@ import {
 } from 'react-native';
 
 import MapView from '../../components/MapView';
+import { BannerHost, useBanner } from '../../components/BannerHost';
 import DriverAvatar from '../../components/DriverAvatar';
 import { getCurrentPosition } from '../../lib/geolocation';
 import {
@@ -42,6 +43,7 @@ import {
   PaymentMethod,
   Ride,
   RideBid,
+  RideStatus,
   setDriverOnline,
   startRide,
 } from '../../lib/rides';
@@ -127,6 +129,7 @@ type RideCtx = {
   setSelectedRide: (r: Ride | null) => void;
   chosenBid: RideBid | null;
   setChosenBid: (b: RideBid | null) => void;
+  currentScreen: ScreenName;
 };
 
 const RideContext = createContext<RideCtx>({
@@ -136,6 +139,7 @@ const RideContext = createContext<RideCtx>({
   setSelectedRide: () => {},
   chosenBid: null,
   setChosenBid: () => {},
+  currentScreen: 'Onboarding',
 });
 
 // ─── SCREEN TRANSITION ────────────────────────────────────────
@@ -439,6 +443,7 @@ function BookScreen({ navigate }: NavProp) {
   const { setRideId } = useContext(RideContext);
   const [price, setPrice] = useState(40);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
+  const [note, setNote] = useState('');
   const [destination, setDestination] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -545,6 +550,7 @@ function BookScreen({ navigate }: NavProp) {
         distance_mi: routeInfo.distance_mi,
         eta_min: routeInfo.eta_min,
         payment_method: paymentMethod,
+        passenger_note: note.trim() || null,
       });
       setRideId(ride.id);
       navigate('Matching');
@@ -676,6 +682,17 @@ function BookScreen({ navigate }: NavProp) {
               ))}
             </View>
 
+            <TextInput
+              style={{ backgroundColor: '#f5f5f5', borderRadius: 10, padding: 12, fontSize: 13, color: '#111', borderWidth: 0.5, borderColor: '#e0e0e0', marginTop: 14, minHeight: 44 }}
+              placeholder="Any notes for your driver? (optional)"
+              placeholderTextColor="#aaa"
+              value={note}
+              onChangeText={setNote}
+              maxLength={280}
+              multiline
+              textAlignVertical="top"
+            />
+
             <TouchableOpacity
               style={[s.redBtn, { backgroundColor: 'white', marginTop: 14, opacity: submitDisabled ? 0.4 : 1 }]}
               onPress={submitRequest}
@@ -774,6 +791,7 @@ function ScheduleScreen({ navigate }: NavProp) {
   const { setRideId } = useContext(RideContext);
   const [price, setPrice] = useState(40);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
+  const [note, setNote] = useState('');
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [selectedTime, setSelectedTime] = useState(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -883,6 +901,7 @@ function ScheduleScreen({ navigate }: NavProp) {
         eta_min: routeInfo.eta_min,
         scheduled_for: when.toISOString(),
         payment_method: paymentMethod,
+        passenger_note: note.trim() || null,
       });
       setRideId(ride.id);
       navigate('Matching');
@@ -1007,6 +1026,17 @@ function ScheduleScreen({ navigate }: NavProp) {
                 </TouchableOpacity>
               ))}
             </View>
+
+            <TextInput
+              style={{ backgroundColor: '#f5f5f5', borderRadius: 10, padding: 12, fontSize: 13, color: '#111', borderWidth: 0.5, borderColor: '#e0e0e0', marginTop: 14, minHeight: 44 }}
+              placeholder="Any notes for your driver? (optional)"
+              placeholderTextColor="#aaa"
+              value={note}
+              onChangeText={setNote}
+              maxLength={280}
+              multiline
+              textAlignVertical="top"
+            />
 
             <TouchableOpacity
               style={[s.redBtn, { backgroundColor: 'white', marginTop: 14, opacity: submitDisabled ? 0.4 : 1 }]}
@@ -1161,10 +1191,20 @@ function DriversScreen({ navigate }: NavProp) {
 
 // ─── CONFIRMED ────────────────────────────────────────────────
 function ConfirmedScreen({ navigate }: NavProp) {
-  const { rideId, setRideId } = useContext(RideContext);
-  const { ride, status } = useRideStatus(rideId);
+  const { rideId, setRideId, currentScreen } = useContext(RideContext);
+  const { showBanner } = useBanner();
+
+  const handleStatusChange = useCallback((newStatus: RideStatus) => {
+    if (newStatus === 'in_progress') showBanner('Your driver started the trip!', 'success');
+  }, [showBanner]);
+
+  const handleChatMessage = useCallback((body: string) => {
+    if (currentScreen !== 'Chat') showBanner(`Driver: ${body.slice(0, 60)}`, 'info');
+  }, [showBanner, currentScreen]);
+
+  const { ride, status } = useRideStatus(rideId, handleStatusChange);
   const driverCoords = useDriverLocation(ride?.driver_id ?? null);
-  const unreadCount = useUnreadChatCount(rideId);
+  const unreadCount = useUnreadChatCount(rideId, handleChatMessage);
   const { driverName, displayString: vehicleDisplay, seats: vehicleSeats } = useDriverVehicle(ride?.driver_id);
   const [seconds, setSeconds] = useState(272);
 
@@ -1317,8 +1357,19 @@ const NEARBY_RADIUS_MI = 25;
 
 function DriverHomeScreen({ navigate }: NavProp) {
   const { setSelectedRide } = useContext(RideContext);
+  const { showBanner } = useBanner();
   const [online, setOnline] = useState(false);
-  const { rides: allRides } = useDriverQueue(online);
+
+  const shortAddr = (addr: string) => addr.split(',')[0];
+
+  const handleNewRide = useCallback((ride: Ride) => {
+    showBanner(
+      `New request: ${shortAddr(ride.pickup_address)} → ${shortAddr(ride.destination_address)} · $${ride.offered_price.toFixed(2)}`,
+      'success',
+    );
+  }, [showBanner]);
+
+  const { rides: allRides } = useDriverQueue(online, handleNewRide);
   const { stats: todayStats } = useDriverTodayStats();
   const { isComplete: vehicleComplete } = useMyVehicle();
   const [driverCoords, setDriverCoords] = useState<LatLng | null>(null);
@@ -1466,7 +1517,10 @@ function DriverHomeScreen({ navigate }: NavProp) {
                   </View>
                   <View style={{ alignItems: 'flex-end' }}>
                     <Text style={[s.tripPrice, { color: RED }]}>${ride.offered_price.toFixed(2)}</Text>
-                    <Text style={[s.muted, { fontSize: 10 }]}>{ride.payment_method === 'etransfer' ? '📱' : '💵'}</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                      <Text style={[s.muted, { fontSize: 10 }]}>{ride.payment_method === 'etransfer' ? '📱' : '💵'}</Text>
+                      {ride.passenger_note ? <Text style={{ fontSize: 10 }}>📝</Text> : null}
+                    </View>
                   </View>
                 </View>
               </TouchableOpacity>
@@ -1649,6 +1703,12 @@ function DriverRequestScreen({ navigate }: NavProp) {
                   </Text>
                 </View>
               ))}
+              {selectedRide.passenger_note ? (
+                <View style={{ backgroundColor: '#FEF3C7', borderRadius: 8, padding: 10, marginTop: 8 }}>
+                  <Text style={{ fontSize: 12, color: '#92400E', fontWeight: '600', marginBottom: 2 }}>📝 Passenger note</Text>
+                  <Text style={{ fontSize: 13, color: '#78350F' }}>{selectedRide.passenger_note}</Text>
+                </View>
+              ) : null}
             </Animated.View>
           </View>
           <View style={{ flexDirection: 'row', gap: 12, marginBottom: 16 }}>
@@ -1673,10 +1733,16 @@ function DriverRequestScreen({ navigate }: NavProp) {
 
 // ─── DRIVER ACTIVE ────────────────────────────────────────────
 function DriverActiveScreen({ navigate }: NavProp) {
-  const { selectedRide, setSelectedRide } = useContext(RideContext);
+  const { selectedRide, setSelectedRide, currentScreen } = useContext(RideContext);
+  const { showBanner } = useBanner();
   const [loading, setLoading] = useState(false);
   const [showPayConfirm, setShowPayConfirm] = useState(false);
-  const unreadCount = useUnreadChatCount(selectedRide?.id ?? null);
+
+  const handleChatMessage = useCallback((body: string) => {
+    if (currentScreen !== 'Chat') showBanner(`Passenger: ${body.slice(0, 60)}`, 'info');
+  }, [showBanner, currentScreen]);
+
+  const unreadCount = useUnreadChatCount(selectedRide?.id ?? null, handleChatMessage);
   const { status: liveStatus } = useRideStatus(selectedRide?.id ?? null);
   const { profile: passengerProfile } = useUserProfile(selectedRide?.passenger_id);
 
@@ -1823,6 +1889,13 @@ function DriverActiveScreen({ navigate }: NavProp) {
             <View style={s.statBox}><Text style={s.statLabel}>ETA</Text><Text style={s.statValue}>{selectedRide.eta_min != null ? `${selectedRide.eta_min} min` : '—'}</Text></View>
             <View style={s.statBox}><Text style={s.statLabel}>Distance</Text><Text style={s.statValue}>{selectedRide.distance_mi != null ? `${selectedRide.distance_mi} mi` : '—'}</Text></View>
           </View>
+
+          {selectedRide.passenger_note ? (
+            <View style={{ backgroundColor: '#FEF3C7', borderRadius: 8, padding: 10, marginBottom: 12 }}>
+              <Text style={{ fontSize: 12, color: '#92400E', fontWeight: '600', marginBottom: 2 }}>📝 Note from passenger</Text>
+              <Text style={{ fontSize: 13, color: '#78350F' }}>{selectedRide.passenger_note}</Text>
+            </View>
+          ) : null}
 
           {!showPayConfirm ? (
             <TouchableOpacity style={s.redBtn} onPress={handleComplete} disabled={loading}>
@@ -2947,6 +3020,48 @@ function DriverVerificationScreen({ navigate }: NavProp) {
   );
 }
 
+// ─── SCHEDULED RIDE REMINDER ──────────────────────────────────
+function ScheduledRideReminderSidecar() {
+  const { showBanner } = useBanner();
+  const alertedRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const { data: u } = await supabase.auth.getUser();
+        if (!u.user) return;
+        const now = new Date();
+        const soon = new Date(now.getTime() + 30 * 60_000);
+        const { data } = await supabase
+          .from('rides')
+          .select('id, scheduled_for, destination_address')
+          .eq('passenger_id', u.user.id)
+          .eq('status', 'matching')
+          .gte('scheduled_for', now.toISOString())
+          .lte('scheduled_for', soon.toISOString());
+        (data ?? []).forEach((ride: any) => {
+          if (!alertedRef.current.has(ride.id)) {
+            alertedRef.current.add(ride.id);
+            const min = Math.round(
+              (new Date(ride.scheduled_for).getTime() - now.getTime()) / 60_000,
+            );
+            showBanner(
+              `Scheduled ride to ${ride.destination_address.split(',')[0]} in ${min} min`,
+              'warning',
+              6000,
+            );
+          }
+        });
+      } catch {}
+    };
+    check();
+    const t = setInterval(check, 60_000);
+    return () => clearInterval(t);
+  }, [showBanner]);
+
+  return null;
+}
+
 // ─── ROUTER ───────────────────────────────────────────────────
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -3018,11 +3133,14 @@ export default function App() {
   }
 
   return (
-    <RideContext.Provider
-      value={{ rideId, setRideId, selectedRide, setSelectedRide, chosenBid, setChosenBid }}
-    >
-      {screens[screen] ?? screens['Onboarding']}
-    </RideContext.Provider>
+    <BannerHost>
+      <ScheduledRideReminderSidecar />
+      <RideContext.Provider
+        value={{ rideId, setRideId, selectedRide, setSelectedRide, chosenBid, setChosenBid, currentScreen: screen }}
+      >
+        {screens[screen] ?? screens['Onboarding']}
+      </RideContext.Provider>
+    </BannerHost>
   );
 }
 

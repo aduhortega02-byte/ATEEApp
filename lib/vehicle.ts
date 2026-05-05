@@ -62,6 +62,7 @@ export function formatVehicleDisplay(v: Vehicle | null | undefined): string | nu
   const parts: string[] = [`${v.vehicle_make} ${v.vehicle_model}`];
   if (v.vehicle_year) parts[0] += ` ${v.vehicle_year}`;
   if (v.vehicle_color) parts.push(v.vehicle_color);
+  if (v.plate_number) parts.push(v.plate_number);
   return parts.join(' · ');
 }
 

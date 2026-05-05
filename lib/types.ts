@@ -158,6 +158,7 @@ export type Ride = {
   payment_method: PaymentMethod | null;
   payment_status: RidePaymentStatus;
   scheduled_for: string | null;
+  passenger_note: string | null;
   created_at: string;
   completed_at: string | null;
 };
