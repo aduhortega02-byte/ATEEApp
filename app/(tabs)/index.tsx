@@ -69,6 +69,13 @@ import { useDriverVehicle } from '../../hooks/useDriverVehicle';
 import { useUserProfile } from '../../hooks/useUserProfile';
 import { useChatMessages } from '../../hooks/useChatMessages';
 import { useUnreadChatCount } from '../../hooks/useUnreadChatCount';
+import { postTrip, cancelTrip, fetchTripById, type Trip, type PostTripInput } from '../../lib/trips';
+import { bookSeats, cancelBooking, type TripBooking } from '../../lib/tripBookings';
+import { findMatchingTrips, type MatchedTrip } from '../../lib/tripMatching';
+import { useAvailableTrips } from '../../hooks/useAvailableTrips';
+import { useMyPostedTrips } from '../../hooks/useMyPostedTrips';
+import { useMyBookings } from '../../hooks/useMyBookings';
+import { useTripBookings } from '../../hooks/useTripBookings';
 import { Session } from '@supabase/supabase-js';
 import AuthScreen from '../auth';
 
@@ -114,7 +121,12 @@ type ScreenName =
   | 'Trips'
   | 'Chat'
   | 'RateTrip'
-  | 'VehicleProfile';
+  | 'VehicleProfile'
+  | 'PostTrip'
+  | 'BrowseTrips'
+  | 'TripDetails'
+  | 'MyPostedTrips'
+  | 'MyBookings';
 
 type NavProp = { navigate: (s: ScreenName) => void };
 
@@ -130,6 +142,12 @@ type RideCtx = {
   chosenBid: RideBid | null;
   setChosenBid: (b: RideBid | null) => void;
   currentScreen: ScreenName;
+  selectedTripId: string | null;
+  setSelectedTripId: (id: string | null) => void;
+  searchOriginCoords: LatLng | null;
+  setSearchOriginCoords: (c: LatLng | null) => void;
+  searchDestinationCoords: LatLng | null;
+  setSearchDestinationCoords: (c: LatLng | null) => void;
 };
 
 const RideContext = createContext<RideCtx>({
@@ -140,6 +158,12 @@ const RideContext = createContext<RideCtx>({
   chosenBid: null,
   setChosenBid: () => {},
   currentScreen: 'Onboarding',
+  selectedTripId: null,
+  setSelectedTripId: () => {},
+  searchOriginCoords: null,
+  setSearchOriginCoords: () => {},
+  searchDestinationCoords: null,
+  setSearchDestinationCoords: () => {},
 });
 
 // ─── SCREEN TRANSITION ────────────────────────────────────────
@@ -440,7 +464,7 @@ function HomeScreen({ navigate }: NavProp) {
 
 // ─── BOOK ─────────────────────────────────────────────────────
 function BookScreen({ navigate }: NavProp) {
-  const { setRideId } = useContext(RideContext);
+  const { setRideId, setSelectedTripId, setSearchOriginCoords, setSearchDestinationCoords } = useContext(RideContext);
   const [price, setPrice] = useState(40);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [note, setNote] = useState('');
@@ -495,6 +519,20 @@ function BookScreen({ navigate }: NavProp) {
     setSuggestedPrice(s);
     setPrice(s);
   }, [routeInfo?.distance_mi, routeInfo?.eta_min]);
+
+  // Find matching driver-posted trips when both endpoints are known
+  const [matchedTrips, setMatchedTrips] = useState<MatchedTrip[]>([]);
+  useEffect(() => {
+    if (!pickupCoords || !destinationCoords) { setMatchedTrips([]); return; }
+    setSearchOriginCoords(pickupCoords);
+    setSearchDestinationCoords(destinationCoords);
+    findMatchingTrips({
+      pickupLat: pickupCoords.lat,
+      pickupLng: pickupCoords.lng,
+      destinationLat: destinationCoords.lat,
+      destinationLng: destinationCoords.lng,
+    }).then(setMatchedTrips).catch(() => {});
+  }, [pickupCoords?.lat, pickupCoords?.lng, destinationCoords?.lat, destinationCoords?.lng]);
 
   const onDestChange = (text: string) => {
     setDestination(text);
@@ -636,6 +674,23 @@ function BookScreen({ navigate }: NavProp) {
               <Text style={s.tabInactiveText}>Scheduled</Text>
             </TouchableOpacity>
           </View>
+
+          {matchedTrips.length > 0 && (
+            <TouchableOpacity
+              style={s.matchBanner}
+              activeOpacity={0.8}
+              onPress={() => {
+                setSelectedTripId(matchedTrips[0].id);
+                navigate('TripDetails');
+              }}
+            >
+              <Text style={s.matchBannerTitle}>🚗 {matchedTrips.length} driver-posted trip{matchedTrips.length > 1 ? 's' : ''} match your route</Text>
+              <Text style={s.matchBannerBody}>
+                Nearest: {shortCity(matchedTrips[0].origin_address)} → {shortCity(matchedTrips[0].destination_address)} · ${Number(matchedTrips[0].price_per_seat).toFixed(2)}/seat · {fmtDeparture(matchedTrips[0].departure_at)}
+              </Text>
+              <Text style={[s.matchBannerBody, { marginTop: 4, fontWeight: '600' }]}>Tap to view →</Text>
+            </TouchableOpacity>
+          )}
 
           <View style={s.pricingCard}>
             <Text style={s.pricingTitle}>Set your price.</Text>
@@ -2707,6 +2762,26 @@ function ProfileScreen({ navigate }: NavProp) {
               )}
             </View>
           )}
+          {(profile?.role === 'driver' || profile?.role === 'both') && (
+            <>
+              <TouchableOpacity style={[s.outlineBtn, { marginTop: 8 }]} onPress={() => navigate('PostTrip')}>
+                <Text style={s.outlineBtnText}>Post a trip</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.outlineBtn, { marginTop: 8 }]} onPress={() => navigate('MyPostedTrips')}>
+                <Text style={s.outlineBtnText}>My posted trips</Text>
+              </TouchableOpacity>
+            </>
+          )}
+          {(profile?.role === 'passenger' || profile?.role === 'both') && (
+            <>
+              <TouchableOpacity style={[s.outlineBtn, { marginTop: 8 }]} onPress={() => navigate('BrowseTrips')}>
+                <Text style={s.outlineBtnText}>Browse trips</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.outlineBtn, { marginTop: 8 }]} onPress={() => navigate('MyBookings')}>
+                <Text style={s.outlineBtnText}>My bookings</Text>
+              </TouchableOpacity>
+            </>
+          )}
           <TouchableOpacity style={s.outlineBtn} onPress={() => navigate('Onboarding')}>
             <Text style={s.outlineBtnText}>Switch role / back to role picker</Text>
           </TouchableOpacity>
@@ -3021,6 +3096,732 @@ function DriverVerificationScreen({ navigate }: NavProp) {
 }
 
 // ─── SCHEDULED RIDE REMINDER ──────────────────────────────────
+// ─── TRIP MARKETPLACE HELPERS ────────────────────────────────
+
+function fmtDeparture(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  const diffMs = d.getTime() - now.getTime();
+  const diffH = diffMs / 3_600_000;
+  if (diffH < 0) return 'Departed';
+  if (diffH < 24) {
+    const h = Math.floor(diffH);
+    const m = Math.round((diffH - h) * 60);
+    return h > 0 ? `in ${h}h ${m}m` : `in ${m}m`;
+  }
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function shortCity(addr: string): string {
+  return addr.split(',')[0] ?? addr;
+}
+
+// ─── TRIP ROW ─────────────────────────────────────────────────
+function TripRow({ trip, onPress, showDriver }: { trip: Trip; onPress: () => void; showDriver?: boolean }) {
+  const { profile: driver } = useUserProfile(showDriver ? trip.driver_id : null);
+  const pct = trip.seats_total > 0 ? (trip.seats_available / trip.seats_total) : 1;
+  return (
+    <TouchableOpacity style={s.marketplaceRow} onPress={onPress} activeOpacity={0.75}>
+      <View style={{ flex: 1 }}>
+        <View style={s.rowBetween}>
+          <Text style={s.tripName} numberOfLines={1}>
+            {shortCity(trip.origin_address)} → {shortCity(trip.destination_address)}
+          </Text>
+          <Text style={[s.tripPrice, { color: RED }]}>${Number(trip.price_per_seat).toFixed(2)}/seat</Text>
+        </View>
+        <Text style={s.tripSub}>{fmtDeparture(trip.departure_at)}</Text>
+        {showDriver && driver && (
+          <Text style={[s.tripSub, { marginTop: 2 }]}>Driver: {driver.full_name ?? '—'}</Text>
+        )}
+        <View style={s.seatBar}>
+          <View style={[s.seatBarFill, { width: `${Math.round(pct * 100)}%` as any }]} />
+        </View>
+        <Text style={s.tripSub}>{trip.seats_available} of {trip.seats_total} seats left</Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+// ─── BOOKING ROW ──────────────────────────────────────────────
+function BookingRow({ booking, onPress }: { booking: TripBooking; onPress: () => void }) {
+  const [trip, setTrip] = useState<Trip | null>(null);
+  useEffect(() => {
+    fetchTripById(booking.trip_id).then(setTrip).catch(() => {});
+  }, [booking.trip_id]);
+  return (
+    <TouchableOpacity style={s.marketplaceRow} onPress={onPress} activeOpacity={0.75}>
+      <View style={{ flex: 1 }}>
+        <View style={s.rowBetween}>
+          <Text style={s.tripName} numberOfLines={1}>
+            {trip ? `${shortCity(trip.origin_address)} → ${shortCity(trip.destination_address)}` : '…'}
+          </Text>
+          <Text style={[s.tripPrice, { color: booking.status === 'cancelled' ? '#aaa' : RED }]}>
+            ${Number(booking.total_price).toFixed(2)}
+          </Text>
+        </View>
+        <Text style={s.tripSub}>
+          {booking.seats_booked} seat{booking.seats_booked > 1 ? 's' : ''}
+          {trip ? ` · ${fmtDeparture(trip.departure_at)}` : ''}
+        </Text>
+        <View style={{ marginTop: 4 }}>
+          <Text style={[s.tripSub, { color: booking.status === 'confirmed' ? GREEN : '#aaa', fontWeight: '600' }]}>
+            {booking.status === 'confirmed' ? '✓ Confirmed' : '✗ Cancelled'}
+          </Text>
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+// ─── POST TRIP SCREEN ─────────────────────────────────────────
+function PostTripScreen({ navigate }: NavProp) {
+  const { showBanner } = useBanner();
+  const { profile } = useMyProfile();
+  const { vehicle, isComplete: vehicleComplete } = useMyVehicle();
+
+  const [originAddress, setOriginAddress] = useState('');
+  const [originSuggestions, setOriginSuggestions] = useState<PlacePrediction[]>([]);
+  const [originCoords, setOriginCoords] = useState<LatLng | null>(null);
+
+  const [destAddress, setDestAddress] = useState('');
+  const [destSuggestions, setDestSuggestions] = useState<PlacePrediction[]>([]);
+  const [destCoords, setDestCoords] = useState<LatLng | null>(null);
+
+  const [departure, setDeparture] = useState<Date>(() => {
+    const d = new Date();
+    d.setHours(d.getHours() + 1, 0, 0, 0);
+    return d;
+  });
+  const [showPicker, setShowPicker] = useState(false);
+  const [seats, setSeats] = useState('2');
+  const [price, setPrice] = useState('');
+  const [description, setDescription] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const isDriver = profile?.role === 'driver' || profile?.role === 'both';
+
+  const searchOrigin = async (text: string) => {
+    setOriginAddress(text);
+    setOriginCoords(null);
+    if (text.length < 3) { setOriginSuggestions([]); return; }
+    try { setOriginSuggestions(await searchPlaces(text)); } catch {}
+  };
+
+  const pickOrigin = async (p: PlacePrediction) => {
+    setOriginAddress(p.description);
+    setOriginSuggestions([]);
+    try {
+      const coords = await geocodePlace(p.place_id);
+      setOriginCoords(coords);
+    } catch {}
+  };
+
+  const searchDest = async (text: string) => {
+    setDestAddress(text);
+    setDestCoords(null);
+    if (text.length < 3) { setDestSuggestions([]); return; }
+    try { setDestSuggestions(await searchPlaces(text)); } catch {}
+  };
+
+  const pickDest = async (p: PlacePrediction) => {
+    setDestAddress(p.description);
+    setDestSuggestions([]);
+    try {
+      const coords = await geocodePlace(p.place_id);
+      setDestCoords(coords);
+    } catch {}
+  };
+
+  const submit = async () => {
+    if (!isDriver) {
+      Alert.alert('Drivers only', 'Only drivers can post trips.');
+      return;
+    }
+    if (!vehicleComplete) {
+      Alert.alert('Vehicle required', 'Complete your vehicle profile before posting a trip.');
+      return;
+    }
+    if (!originCoords || !originAddress) {
+      Alert.alert('Origin required', 'Select a pickup location.');
+      return;
+    }
+    if (!destCoords || !destAddress) {
+      Alert.alert('Destination required', 'Select a destination.');
+      return;
+    }
+    const seatsNum = parseInt(seats, 10);
+    if (!seatsNum || seatsNum < 1 || seatsNum > 8) {
+      Alert.alert('Invalid seats', 'Enter a number of seats between 1 and 8.');
+      return;
+    }
+    const priceNum = parseFloat(price);
+    if (!priceNum || priceNum <= 0) {
+      Alert.alert('Invalid price', 'Enter a price per seat.');
+      return;
+    }
+    if (departure.getTime() < Date.now()) {
+      Alert.alert('Invalid time', 'Departure must be in the future.');
+      return;
+    }
+    try {
+      setSubmitting(true);
+      const input: PostTripInput = {
+        origin_address: originAddress,
+        origin_lat: originCoords.lat,
+        origin_lng: originCoords.lng,
+        destination_address: destAddress,
+        destination_lat: destCoords.lat,
+        destination_lng: destCoords.lng,
+        departure_at: departure.toISOString(),
+        seats_total: seatsNum,
+        price_per_seat: priceNum,
+        description: description.trim() || undefined,
+      };
+      await postTrip(input);
+      showBanner('Trip posted!', 'success');
+      navigate('MyPostedTrips');
+    } catch (e: any) {
+      Alert.alert('Error', e.message ?? 'Could not post trip.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (!isDriver) {
+    return (
+      <ScreenTransition>
+        <SafeAreaView style={s.screen}>
+          <TopBar title="Post a Trip" onBack={() => navigate('Profile')} />
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+            <Text style={{ fontSize: 15, color: '#555', textAlign: 'center' }}>Only drivers can post trips.</Text>
+          </View>
+        </SafeAreaView>
+      </ScreenTransition>
+    );
+  }
+
+  return (
+    <ScreenTransition>
+      <SafeAreaView style={s.screen}>
+        <TopBar title="Post a Trip" onBack={() => navigate('Profile')} />
+        <ScrollView contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
+          {!vehicleComplete && (
+            <TouchableOpacity
+              style={[s.vehicleBanner, { marginBottom: 16 }]}
+              onPress={() => navigate('VehicleProfile')}
+            >
+              <Text style={s.vehicleBannerText}>Complete your vehicle profile to post trips.</Text>
+              <View style={s.vehicleBannerBtn}>
+                <Text style={s.vehicleBannerBtnText}>Add vehicle →</Text>
+              </View>
+            </TouchableOpacity>
+          )}
+
+          <Text style={s.fieldLabel}>PICKUP LOCATION</Text>
+          <TextInput
+            style={s.fieldInput}
+            placeholder="City or address"
+            placeholderTextColor="#aaa"
+            value={originAddress}
+            onChangeText={searchOrigin}
+          />
+          {originSuggestions.length > 0 && (
+            <View style={s.suggestBox}>
+              {originSuggestions.slice(0, 4).map((p) => (
+                <TouchableOpacity key={p.place_id} style={s.suggestRow} onPress={() => pickOrigin(p)}>
+                  <Text style={s.suggestText} numberOfLines={1}>{p.description}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+
+          <Text style={[s.fieldLabel, { marginTop: 14 }]}>DESTINATION</Text>
+          <TextInput
+            style={s.fieldInput}
+            placeholder="City or address"
+            placeholderTextColor="#aaa"
+            value={destAddress}
+            onChangeText={searchDest}
+          />
+          {destSuggestions.length > 0 && (
+            <View style={s.suggestBox}>
+              {destSuggestions.slice(0, 4).map((p) => (
+                <TouchableOpacity key={p.place_id} style={s.suggestRow} onPress={() => pickDest(p)}>
+                  <Text style={s.suggestText} numberOfLines={1}>{p.description}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+
+          <Text style={[s.fieldLabel, { marginTop: 14 }]}>DEPARTURE TIME</Text>
+          <TouchableOpacity style={s.fieldInput} onPress={() => setShowPicker(true)}>
+            <Text style={{ fontSize: 14, color: '#111' }}>
+              {departure.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+            </Text>
+          </TouchableOpacity>
+          {showPicker && (
+            <DateTimePicker
+              value={departure}
+              mode="datetime"
+              display={Platform.OS === 'ios' ? 'inline' : 'default'}
+              minimumDate={new Date()}
+              onChange={(_e, d) => { setShowPicker(false); if (d) setDeparture(d); }}
+            />
+          )}
+
+          <Text style={[s.fieldLabel, { marginTop: 14 }]}>SEATS AVAILABLE</Text>
+          <TextInput
+            style={s.fieldInput}
+            placeholder="1–8"
+            placeholderTextColor="#aaa"
+            value={seats}
+            onChangeText={setSeats}
+            keyboardType="number-pad"
+            maxLength={1}
+          />
+
+          <Text style={[s.fieldLabel, { marginTop: 14 }]}>PRICE PER SEAT ($)</Text>
+          <TextInput
+            style={s.fieldInput}
+            placeholder="e.g. 25.00"
+            placeholderTextColor="#aaa"
+            value={price}
+            onChangeText={setPrice}
+            keyboardType="decimal-pad"
+          />
+
+          <Text style={[s.fieldLabel, { marginTop: 14 }]}>DESCRIPTION (optional)</Text>
+          <TextInput
+            style={[s.fieldInput, { minHeight: 70, textAlignVertical: 'top' }]}
+            placeholder="Luggage space, stops, notes…"
+            placeholderTextColor="#aaa"
+            value={description}
+            onChangeText={setDescription}
+            multiline
+            maxLength={280}
+          />
+
+          <TouchableOpacity
+            style={[s.redBtn, { marginTop: 20, opacity: submitting ? 0.6 : 1 }]}
+            onPress={submit}
+            disabled={submitting}
+          >
+            {submitting ? <ActivityIndicator color="white" /> : <Text style={s.redBtnText}>Post Trip</Text>}
+          </TouchableOpacity>
+        </ScrollView>
+      </SafeAreaView>
+    </ScreenTransition>
+  );
+}
+
+// ─── BROWSE TRIPS SCREEN ──────────────────────────────────────
+function BrowseTripsScreen({ navigate }: NavProp) {
+  const { setSelectedTripId, searchOriginCoords, searchDestinationCoords } = useContext(RideContext);
+  const { trips: allTrips, loading } = useAvailableTrips();
+  const [matchedTrips, setMatchedTrips] = useState<MatchedTrip[]>([]);
+  const [filtering, setFiltering] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const hasGeoFilter = !!(searchOriginCoords && searchDestinationCoords) && !showAll;
+
+  useEffect(() => {
+    if (!searchOriginCoords || !searchDestinationCoords) { setMatchedTrips([]); return; }
+    setFiltering(true);
+    findMatchingTrips({
+      pickupLat: searchOriginCoords.lat,
+      pickupLng: searchOriginCoords.lng,
+      destinationLat: searchDestinationCoords.lat,
+      destinationLng: searchDestinationCoords.lng,
+    }).then((r) => { setMatchedTrips(r); setFiltering(false); }).catch(() => setFiltering(false));
+  }, [searchOriginCoords?.lat, searchOriginCoords?.lng, searchDestinationCoords?.lat, searchDestinationCoords?.lng]);
+
+  const displayTrips = hasGeoFilter ? matchedTrips : allTrips;
+  const isLoading = loading || filtering;
+
+  return (
+    <ScreenTransition>
+      <SafeAreaView style={s.screen}>
+        <TopBar title="Browse Trips" onBack={() => navigate('Profile')} />
+        <ScrollView contentContainerStyle={{ padding: 16 }}>
+          {hasGeoFilter && (
+            <View style={[s.matchBanner, { marginBottom: 12 }]}>
+              <Text style={s.matchBannerTitle}>Showing trips near your route</Text>
+              <Text style={s.matchBannerBody}>
+                {matchedTrips.length} match{matchedTrips.length !== 1 ? 'es' : ''} within 5 miles of your pickup and drop-off
+              </Text>
+            </View>
+          )}
+          {isLoading ? (
+            <><SkeletonCard /><SkeletonCard /></>
+          ) : displayTrips.length === 0 ? (
+            <View style={{ alignItems: 'center', paddingTop: 40 }}>
+              <Text style={{ fontSize: 15, color: '#aaa' }}>
+                {hasGeoFilter ? 'No trips match your route.' : 'No trips available right now.'}
+              </Text>
+              {hasGeoFilter && (
+                <TouchableOpacity style={[s.outlineBtn, { marginTop: 12 }]} onPress={() => setShowAll(true)}>
+                  <Text style={s.outlineBtnText}>Show all trips</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          ) : (
+            displayTrips.map((t) => (
+              <TripRow
+                key={t.id}
+                trip={t}
+                showDriver
+                onPress={() => {
+                  setSelectedTripId(t.id);
+                  navigate('TripDetails');
+                }}
+              />
+            ))
+          )}
+        </ScrollView>
+      </SafeAreaView>
+    </ScreenTransition>
+  );
+}
+
+// ─── TRIP DETAILS SCREEN ──────────────────────────────────────
+function TripDetailsScreen({ navigate }: NavProp) {
+  const { showBanner } = useBanner();
+  const { selectedTripId } = useContext(RideContext);
+  const { profile: myProfile } = useMyProfile();
+  const { bookings } = useTripBookings(selectedTripId);
+
+  const [trip, setTrip] = useState<Trip | null>(null);
+  const [loadingTrip, setLoadingTrip] = useState(true);
+  const [seats, setSeats] = useState('1');
+  const [payMethod, setPayMethod] = useState<'cash' | 'card'>('cash');
+  const [note, setNote] = useState('');
+  const [booking, setBooking] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+
+  useEffect(() => {
+    if (!selectedTripId) { setLoadingTrip(false); return; }
+    fetchTripById(selectedTripId).then((t) => { setTrip(t); setLoadingTrip(false); }).catch(() => setLoadingTrip(false));
+  }, [selectedTripId]);
+
+  const isMyTrip = !!(myProfile && trip && myProfile.id === trip.driver_id);
+  const myConfirmedBooking = bookings.find(
+    (b) => b.passenger_id === myProfile?.id && b.status === 'confirmed',
+  );
+
+  const handleBook = async () => {
+    if (!trip || !selectedTripId) return;
+    const seatsNum = parseInt(seats, 10);
+    if (!seatsNum || seatsNum < 1) { Alert.alert('Invalid', 'Enter number of seats.'); return; }
+    if (seatsNum > trip.seats_available) { Alert.alert('Not enough seats', `Only ${trip.seats_available} left.`); return; }
+    try {
+      setBooking(true);
+      await bookSeats({
+        tripId: selectedTripId,
+        seats: seatsNum,
+        pricePerSeat: Number(trip.price_per_seat),
+        paymentMethod: payMethod,
+        note: note.trim() || undefined,
+      });
+      showBanner('Seats booked!', 'success');
+      navigate('MyBookings');
+    } catch (e: any) {
+      Alert.alert('Error', e.message ?? 'Could not book seats.');
+    } finally {
+      setBooking(false);
+    }
+  };
+
+  const handleCancelTrip = async () => {
+    if (!selectedTripId) return;
+    Alert.alert('Cancel trip?', 'This will cancel the trip and notify passengers.', [
+      { text: 'Keep', style: 'cancel' },
+      {
+        text: 'Cancel trip', style: 'destructive', onPress: async () => {
+          try {
+            setCancelling(true);
+            await cancelTrip(selectedTripId);
+            showBanner('Trip cancelled', 'info');
+            navigate('MyPostedTrips');
+          } catch (e: any) {
+            Alert.alert('Error', e.message ?? 'Could not cancel.');
+          } finally {
+            setCancelling(false);
+          }
+        },
+      },
+    ]);
+  };
+
+  const handleCancelBooking = async () => {
+    if (!myConfirmedBooking) return;
+    Alert.alert('Cancel booking?', 'Your seats will be released.', [
+      { text: 'Keep', style: 'cancel' },
+      {
+        text: 'Cancel', style: 'destructive', onPress: async () => {
+          try {
+            setCancelling(true);
+            await cancelBooking(myConfirmedBooking.id);
+            showBanner('Booking cancelled', 'info');
+            navigate('MyBookings');
+          } catch (e: any) {
+            Alert.alert('Error', e.message ?? 'Could not cancel.');
+          } finally {
+            setCancelling(false);
+          }
+        },
+      },
+    ]);
+  };
+
+  if (loadingTrip) {
+    return (
+      <ScreenTransition>
+        <SafeAreaView style={s.screen}>
+          <TopBar title="Trip Details" onBack={() => navigate('BrowseTrips')} />
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+            <ActivityIndicator color={RED} />
+          </View>
+        </SafeAreaView>
+      </ScreenTransition>
+    );
+  }
+
+  if (!trip) {
+    return (
+      <ScreenTransition>
+        <SafeAreaView style={s.screen}>
+          <TopBar title="Trip Details" onBack={() => navigate('BrowseTrips')} />
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ color: '#aaa' }}>Trip not found.</Text>
+          </View>
+        </SafeAreaView>
+      </ScreenTransition>
+    );
+  }
+
+  const backScreen: ScreenName = isMyTrip ? 'MyPostedTrips' : 'BrowseTrips';
+
+  return (
+    <ScreenTransition>
+      <SafeAreaView style={s.screen}>
+        <TopBar title="Trip Details" onBack={() => navigate(backScreen)} />
+        <ScrollView contentContainerStyle={{ padding: 16 }}>
+          <View style={s.card}>
+            <Text style={[s.fieldLabel, { marginBottom: 4 }]}>ROUTE</Text>
+            <Text style={s.tripName}>{trip.origin_address}</Text>
+            <Text style={[s.muted, { marginTop: 2 }]}>→ {trip.destination_address}</Text>
+          </View>
+
+          <View style={[s.rowBetween, { marginBottom: 12 }]}>
+            <View style={[s.card, { flex: 1, marginRight: 6, marginBottom: 0 }]}>
+              <Text style={s.fieldLabel}>DEPARTURE</Text>
+              <Text style={s.cardValue}>{fmtDeparture(trip.departure_at)}</Text>
+            </View>
+            <View style={[s.card, { flex: 1, marginLeft: 6, marginBottom: 0 }]}>
+              <Text style={s.fieldLabel}>PRICE/SEAT</Text>
+              <Text style={[s.cardValue, { color: RED }]}>${Number(trip.price_per_seat).toFixed(2)}</Text>
+            </View>
+          </View>
+
+          <View style={[s.rowBetween, { marginBottom: 12 }]}>
+            <View style={[s.card, { flex: 1, marginRight: 6, marginBottom: 0 }]}>
+              <Text style={s.fieldLabel}>SEATS LEFT</Text>
+              <Text style={s.cardValue}>{trip.seats_available} / {trip.seats_total}</Text>
+            </View>
+            <View style={[s.card, { flex: 1, marginLeft: 6, marginBottom: 0 }]}>
+              <Text style={s.fieldLabel}>STATUS</Text>
+              <Text style={[s.cardValue, { color: trip.status === 'active' ? GREEN : '#aaa' }]}>{trip.status}</Text>
+            </View>
+          </View>
+
+          {trip.description ? (
+            <View style={[s.card, { marginBottom: 12 }]}>
+              <Text style={s.fieldLabel}>NOTES FROM DRIVER</Text>
+              <Text style={{ fontSize: 13, color: '#333', marginTop: 4 }}>{trip.description}</Text>
+            </View>
+          ) : null}
+
+          {/* Driver view: list bookings + cancel trip */}
+          {isMyTrip && (
+            <>
+              <Text style={[s.sectionTitle, { marginTop: 8 }]}>Passenger Bookings ({bookings.filter(b => b.status === 'confirmed').length})</Text>
+              {bookings.length === 0 ? (
+                <Text style={s.muted}>No bookings yet.</Text>
+              ) : (
+                bookings.map((b) => (
+                  <View key={b.id} style={[s.card, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
+                    <View>
+                      <Text style={s.tripName}>{b.seats_booked} seat{b.seats_booked > 1 ? 's' : ''}</Text>
+                      <Text style={s.tripSub}>${Number(b.total_price).toFixed(2)} · {b.payment_method}</Text>
+                      {b.passenger_note ? (
+                        <Text style={[s.tripSub, { color: AMBER, marginTop: 2 }]}>"{b.passenger_note}"</Text>
+                      ) : null}
+                    </View>
+                    <Text style={[s.tripSub, { color: b.status === 'confirmed' ? GREEN : '#aaa', fontWeight: '600' }]}>
+                      {b.status === 'confirmed' ? '✓' : '✗'}
+                    </Text>
+                  </View>
+                ))
+              )}
+              {trip.status === 'active' && (
+                <TouchableOpacity
+                  style={[s.outlineBtn, { borderColor: '#c0392b', marginTop: 16, opacity: cancelling ? 0.6 : 1 }]}
+                  onPress={handleCancelTrip}
+                  disabled={cancelling}
+                >
+                  {cancelling ? <ActivityIndicator color="#c0392b" /> : <Text style={[s.outlineBtnText, { color: '#c0392b' }]}>Cancel Trip</Text>}
+                </TouchableOpacity>
+              )}
+            </>
+          )}
+
+          {/* Passenger view: book or cancel booking */}
+          {!isMyTrip && trip.status === 'active' && (
+            <>
+              {myConfirmedBooking ? (
+                <View style={[s.card, { borderColor: GREEN, borderWidth: 1 }]}>
+                  <Text style={[s.fieldLabel, { color: GREEN }]}>YOUR BOOKING</Text>
+                  <Text style={s.tripName}>{myConfirmedBooking.seats_booked} seat{myConfirmedBooking.seats_booked > 1 ? 's' : ''} · ${Number(myConfirmedBooking.total_price).toFixed(2)}</Text>
+                  <TouchableOpacity
+                    style={[s.outlineBtn, { borderColor: '#c0392b', marginTop: 12, opacity: cancelling ? 0.6 : 1 }]}
+                    onPress={handleCancelBooking}
+                    disabled={cancelling}
+                  >
+                    {cancelling ? <ActivityIndicator color="#c0392b" /> : <Text style={[s.outlineBtnText, { color: '#c0392b' }]}>Cancel Booking</Text>}
+                  </TouchableOpacity>
+                </View>
+              ) : trip.seats_available > 0 ? (
+                <View style={s.card}>
+                  <Text style={s.fieldLabel}>BOOK SEATS</Text>
+                  <View style={s.rowBetween}>
+                    <Text style={{ fontSize: 13, color: '#555' }}>Number of seats</Text>
+                    <TextInput
+                      style={[s.fieldInput, { width: 60, textAlign: 'center', paddingVertical: 6 }]}
+                      value={seats}
+                      onChangeText={setSeats}
+                      keyboardType="number-pad"
+                      maxLength={1}
+                    />
+                  </View>
+                  <Text style={[s.fieldLabel, { marginTop: 12 }]}>PAYMENT</Text>
+                  <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+                    {(['cash', 'card'] as const).map((m) => (
+                      <TouchableOpacity
+                        key={m}
+                        style={[s.tabInactive, { flex: 1, borderColor: payMethod === m ? RED : '#ddd', backgroundColor: payMethod === m ? '#fff0f0' : 'white' }]}
+                        onPress={() => setPayMethod(m)}
+                      >
+                        <Text style={[s.tabInactiveText, { color: payMethod === m ? RED : '#555' }]}>{m === 'cash' ? '💵 Cash' : '💳 Card'}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  <Text style={s.fieldLabel}>NOTE (optional)</Text>
+                  <TextInput
+                    style={[s.fieldInput, { minHeight: 50, textAlignVertical: 'top' }]}
+                    placeholder="Any notes for the driver…"
+                    placeholderTextColor="#aaa"
+                    value={note}
+                    onChangeText={setNote}
+                    multiline
+                    maxLength={280}
+                  />
+                  <Text style={[s.muted, { textAlign: 'right' }]}>
+                    Total: ${(parseInt(seats || '0', 10) * Number(trip.price_per_seat)).toFixed(2)}
+                  </Text>
+                  <TouchableOpacity
+                    style={[s.redBtn, { marginTop: 12, opacity: booking ? 0.6 : 1 }]}
+                    onPress={handleBook}
+                    disabled={booking}
+                  >
+                    {booking ? <ActivityIndicator color="white" /> : <Text style={s.redBtnText}>Confirm Booking</Text>}
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={[s.card, { alignItems: 'center' }]}>
+                  <Text style={{ color: '#aaa', fontSize: 13 }}>This trip is fully booked.</Text>
+                </View>
+              )}
+            </>
+          )}
+        </ScrollView>
+      </SafeAreaView>
+    </ScreenTransition>
+  );
+}
+
+// ─── MY POSTED TRIPS SCREEN ───────────────────────────────────
+function MyPostedTripsScreen({ navigate }: NavProp) {
+  const { setSelectedTripId } = useContext(RideContext);
+  const { trips, loading } = useMyPostedTrips();
+
+  return (
+    <ScreenTransition>
+      <SafeAreaView style={s.screen}>
+        <TopBar title="My Posted Trips" onBack={() => navigate('Profile')} />
+        <ScrollView contentContainerStyle={{ padding: 16 }}>
+          <TouchableOpacity style={[s.redBtn, { marginBottom: 16 }]} onPress={() => navigate('PostTrip')}>
+            <Text style={s.redBtnText}>+ Post New Trip</Text>
+          </TouchableOpacity>
+          {loading ? (
+            <><SkeletonCard /><SkeletonCard /></>
+          ) : trips.length === 0 ? (
+            <View style={{ alignItems: 'center', paddingTop: 32 }}>
+              <Text style={{ fontSize: 15, color: '#aaa' }}>No trips posted yet.</Text>
+            </View>
+          ) : (
+            trips.map((t) => (
+              <TripRow
+                key={t.id}
+                trip={t}
+                onPress={() => {
+                  setSelectedTripId(t.id);
+                  navigate('TripDetails');
+                }}
+              />
+            ))
+          )}
+        </ScrollView>
+      </SafeAreaView>
+    </ScreenTransition>
+  );
+}
+
+// ─── MY BOOKINGS SCREEN ───────────────────────────────────────
+function MyBookingsScreen({ navigate }: NavProp) {
+  const { setSelectedTripId } = useContext(RideContext);
+  const { bookings, loading } = useMyBookings();
+
+  return (
+    <ScreenTransition>
+      <SafeAreaView style={s.screen}>
+        <TopBar title="My Bookings" onBack={() => navigate('Profile')} />
+        <ScrollView contentContainerStyle={{ padding: 16 }}>
+          {loading ? (
+            <><SkeletonCard /><SkeletonCard /></>
+          ) : bookings.length === 0 ? (
+            <View style={{ alignItems: 'center', paddingTop: 40 }}>
+              <Text style={{ fontSize: 15, color: '#aaa' }}>No bookings yet.</Text>
+              <TouchableOpacity style={[s.outlineBtn, { marginTop: 12 }]} onPress={() => navigate('BrowseTrips')}>
+                <Text style={s.outlineBtnText}>Browse trips</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            bookings.map((b) => (
+              <BookingRow
+                key={b.id}
+                booking={b}
+                onPress={() => {
+                  setSelectedTripId(b.trip_id);
+                  navigate('TripDetails');
+                }}
+              />
+            ))
+          )}
+        </ScrollView>
+      </SafeAreaView>
+    </ScreenTransition>
+  );
+}
+
 function ScheduledRideReminderSidecar() {
   const { showBanner } = useBanner();
   const alertedRef = useRef<Set<string>>(new Set());
@@ -3071,6 +3872,9 @@ export default function App() {
   const [initialRouteDone, setInitialRouteDone] = useState(false);
   const [selectedRide, setSelectedRide] = useState<Ride | null>(null);
   const [chosenBid, setChosenBid] = useState<RideBid | null>(null);
+  const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
+  const [searchOriginCoords, setSearchOriginCoords] = useState<LatLng | null>(null);
+  const [searchDestinationCoords, setSearchDestinationCoords] = useState<LatLng | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session: s } }) => {
@@ -3118,6 +3922,11 @@ export default function App() {
     Chat: <ChatScreen navigate={navigate} />,
     RateTrip: <RateTripScreen navigate={navigate} />,
     VehicleProfile: <VehicleProfileScreen navigate={navigate} />,
+    PostTrip: <PostTripScreen navigate={navigate} />,
+    BrowseTrips: <BrowseTripsScreen navigate={navigate} />,
+    TripDetails: <TripDetailsScreen navigate={navigate} />,
+    MyPostedTrips: <MyPostedTripsScreen navigate={navigate} />,
+    MyBookings: <MyBookingsScreen navigate={navigate} />,
   };
 
   if (!authChecked) {
@@ -3136,7 +3945,7 @@ export default function App() {
     <BannerHost>
       <ScheduledRideReminderSidecar />
       <RideContext.Provider
-        value={{ rideId, setRideId, selectedRide, setSelectedRide, chosenBid, setChosenBid, currentScreen: screen }}
+        value={{ rideId, setRideId, selectedRide, setSelectedRide, chosenBid, setChosenBid, currentScreen: screen, selectedTripId, setSelectedTripId, searchOriginCoords, setSearchOriginCoords, searchDestinationCoords, setSearchDestinationCoords }}
       >
         {screens[screen] ?? screens['Onboarding']}
       </RideContext.Provider>
@@ -3332,4 +4141,13 @@ const s = StyleSheet.create({
   vehicleFieldWrap: { marginBottom: 14 },
   vehicleFieldLabel: { fontSize: 12, color: '#666', fontWeight: '600', letterSpacing: 0.5, marginBottom: 6, textTransform: 'uppercase' },
   vehicleFieldInput: { backgroundColor: '#f5f5f5', borderRadius: 10, paddingHorizontal: 14, paddingVertical: 11, fontSize: 15, color: '#111', borderWidth: 0.5, borderColor: '#ddd' },
+  // Marketplace
+  marketplaceRow: { backgroundColor: '#fafafa', borderRadius: 12, padding: 14, marginBottom: 10, borderWidth: 0.5, borderColor: '#eee' },
+  seatBar: { height: 4, backgroundColor: '#eee', borderRadius: 2, marginTop: 6, marginBottom: 2, overflow: 'hidden' },
+  seatBarFill: { height: 4, backgroundColor: GREEN, borderRadius: 2 },
+  fieldLabel: { fontSize: 10, color: '#999', letterSpacing: 1, marginBottom: 6, fontWeight: '600' as const },
+  fieldInput: { backgroundColor: '#f5f5f5', borderRadius: 10, padding: 12, fontSize: 14, color: '#111', borderWidth: 0.5, borderColor: '#e0e0e0' },
+  matchBanner: { backgroundColor: '#EFF6FF', borderRadius: 12, padding: 14, marginBottom: 12, borderWidth: 1, borderColor: '#BFDBFE' },
+  matchBannerTitle: { fontSize: 13, fontWeight: '600' as const, color: '#1D4ED8', marginBottom: 4 },
+  matchBannerBody: { fontSize: 12, color: '#2563EB' },
 });
