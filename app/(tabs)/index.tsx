@@ -7,10 +7,12 @@ import {
   Alert,
   Animated,
   Dimensions,
+  Linking,
   PanResponder,
   Platform,
   SafeAreaView,
   ScrollView,
+  Share,
   StatusBar,
   StyleSheet,
   Text,
@@ -40,6 +42,8 @@ import {
   chooseDriver,
   completeRideWithPayment,
   createRide,
+  joinOrCreateSharedGroup,
+  updateDriverAvailableSeats,
   PaymentMethod,
   Ride,
   RideBid,
@@ -47,6 +51,15 @@ import {
   setDriverOnline,
   startRide,
 } from '../../lib/rides';
+import {
+  acceptNegotiation,
+  cancelNegotiation,
+  declineNegotiation,
+  sendDriverCounter,
+  sendPassengerCounter,
+} from '../../lib/negotiations';
+import { useRideNegotiations, useDriverNegotiations } from '../../hooks/useNegotiations';
+import type { RideNegotiation } from '../../lib/types';
 import { useDriverDocuments } from '../../hooks/useDriverDocuments';
 import { useDriverLocation } from '../../hooks/useDriverLocation';
 import { useDriverQueue } from '../../hooks/useDriverQueue';
@@ -59,7 +72,7 @@ import { useRideBids } from '../../hooks/useRideBids';
 import { useRideStatus } from '../../hooks/useRideStatus';
 import { uploadDocument, type DocumentType, type DriverDocument } from '../../lib/kycDocs';
 import { startLocationStream, stopLocationStream } from '../../lib/locationStream';
-import { fetchRecentRidesForPassenger, fetchDriverRides } from '../../lib/passenger';
+import { fetchRecentRidesForPassenger, fetchDriverRides, countOnlineDrivers } from '../../lib/passenger';
 import type { Ride as RideType } from '../../lib/types';
 import { sendTextMessage, sendLocationMessage, sendQuickReply, type ChatMessage } from '../../lib/chat';
 import { submitRating } from '../../lib/ratings';
@@ -72,12 +85,23 @@ import { useUnreadChatCount } from '../../hooks/useUnreadChatCount';
 import { postTrip, cancelTrip, fetchTripById, type Trip, type PostTripInput } from '../../lib/trips';
 import { bookSeats, cancelBooking, type TripBooking } from '../../lib/tripBookings';
 import { findMatchingTrips, type MatchedTrip } from '../../lib/tripMatching';
+import { createRidePaymentIntent, createBookingPaymentIntent, cancelAndRefundRide, startConnectOnboarding } from '../../lib/stripePayments';
+import { StripeProvider, useStripe } from '../../lib/stripe';
 import { useAvailableTrips } from '../../hooks/useAvailableTrips';
 import { useMyPostedTrips } from '../../hooks/useMyPostedTrips';
 import { useMyBookings } from '../../hooks/useMyBookings';
 import { useTripBookings } from '../../hooks/useTripBookings';
 import { Session } from '@supabase/supabase-js';
 import AuthScreen from '../auth';
+import { registerForPushNotifications, notifyUsers, scheduleLocalNotification } from '../../lib/notifications';
+import { useDriverEta } from '../../hooks/useDriverEta';
+import { fetchSavedLocations, upsertSavedLocation, deleteSavedLocation, type SavedLocation } from '../../lib/savedLocations';
+import { useSavedLocations } from '../../hooks/useSavedLocations';
+import { fetchDriverCancelRate, saveDriverPreferredArea, fetchDriverPreferredArea } from '../../lib/driver';
+import { buildShareText, applyReferralCode } from '../../lib/referrals';
+import { calculatePriceRecommendation, getPriceLabel, getPriceColor, type PriceRecommendation } from '../../lib/pricing';
+import { useReferral } from '../../hooks/useReferral';
+import { useOnlineDriverCount } from '../../hooks/useOnlineDriverCount';
 
 const { width } = Dimensions.get('window');
 const RED = '#8B0000';
@@ -126,7 +150,8 @@ type ScreenName =
   | 'BrowseTrips'
   | 'TripDetails'
   | 'MyPostedTrips'
-  | 'MyBookings';
+  | 'MyBookings'
+  | 'SavedLocations';
 
 type NavProp = { navigate: (s: ScreenName) => void };
 
@@ -148,6 +173,11 @@ type RideCtx = {
   setSearchOriginCoords: (c: LatLng | null) => void;
   searchDestinationCoords: LatLng | null;
   setSearchDestinationCoords: (c: LatLng | null) => void;
+  rebookRide: RideType | null;
+  setRebookRide: (r: RideType | null) => void;
+  // Driver online state lives here so it survives navigation between screens
+  driverIsOnline: boolean;
+  setDriverIsOnline: (online: boolean) => void;
 };
 
 const RideContext = createContext<RideCtx>({
@@ -164,6 +194,10 @@ const RideContext = createContext<RideCtx>({
   setSearchOriginCoords: () => {},
   searchDestinationCoords: null,
   setSearchDestinationCoords: () => {},
+  rebookRide: null,
+  setRebookRide: () => {},
+  driverIsOnline: false,
+  setDriverIsOnline: () => {},
 });
 
 // ─── SCREEN TRANSITION ────────────────────────────────────────
@@ -398,10 +432,46 @@ function OnboardingScreen({ navigate }: NavProp) {
   );
 }
 
+// ─── REFERRAL BANNER ──────────────────────────────────────────
+function ReferralBanner() {
+  const { referralCode, referralCount, loading } = useReferral();
+
+  if (loading || !referralCode) return null;
+
+  const handleShare = async () => {
+    try {
+      haptic.impact();
+      await Share.share({ message: buildShareText(referralCode) });
+    } catch {
+      // user dismissed share sheet
+    }
+  };
+
+  return (
+    <View style={s.referralBanner}>
+      <View style={{ flex: 1 }}>
+        <Text style={s.referralBannerTitle}>
+          {referralCount > 0
+            ? `${referralCount} friend${referralCount > 1 ? 's' : ''} joined with your code!`
+            : 'Invite friends to ATEE'}
+        </Text>
+        <Text style={s.referralBannerSub}>
+          Share your code <Text style={s.referralCode}>{referralCode}</Text> — friends join, everyone wins
+        </Text>
+      </View>
+      <TouchableOpacity style={s.referralShareBtn} onPress={handleShare}>
+        <Ionicons name="share-social-outline" size={16} color="white" />
+        <Text style={s.referralShareBtnText}>Invite</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 // ─── HOME ─────────────────────────────────────────────────────
 function HomeScreen({ navigate }: NavProp) {
   const { profile } = useMyProfile();
   const { rides, loading: ridesLoading } = usePassengerRecentRides();
+  const { count: driverCount, loading: driverLoading, available: driversAvailable } = useOnlineDriverCount();
 
   const greeting = (() => {
     const h = new Date().getHours();
@@ -418,6 +488,18 @@ function HomeScreen({ navigate }: NavProp) {
         <ScrollView contentContainerStyle={{ padding: 16 }}>
           <Text style={s.greeting}>{greeting}</Text>
           <Text style={s.bigTitle}>Where to?</Text>
+
+          {!driverLoading && (
+            <View style={[s.driverStatusBanner, { backgroundColor: driversAvailable ? '#f0fdf4' : '#fff7ed', borderColor: driversAvailable ? '#bbf7d0' : '#fed7aa' }]}>
+              <View style={[s.driverStatusDot, { backgroundColor: driversAvailable ? '#22c55e' : '#f97316' }]} />
+              <Text style={[s.driverStatusText, { color: driversAvailable ? '#15803d' : '#c2410c' }]}>
+                {driversAvailable
+                  ? `${driverCount} driver${driverCount > 1 ? 's' : ''} available nearby`
+                  : 'No drivers online right now — check back soon'}
+              </Text>
+            </View>
+          )}
+
           <TouchableOpacity
             style={s.searchBar}
             onPress={() => { haptic.select(); navigate('Book'); }}
@@ -426,11 +508,19 @@ function HomeScreen({ navigate }: NavProp) {
             <Text style={s.searchPlaceholder}>Enter destination</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={s.redBtn}
-            onPress={() => { haptic.impact(); navigate('Book'); }}
+            style={[s.redBtn, !driversAvailable && !driverLoading && { opacity: 0.5 }]}
+            onPress={() => {
+              if (!driversAvailable && !driverLoading) {
+                Alert.alert('No drivers available', 'No drivers are online right now. Please check back shortly.');
+                return;
+              }
+              haptic.impact();
+              navigate('Book');
+            }}
           >
             <Text style={s.redBtnText}>Book a New Ride</Text>
           </TouchableOpacity>
+          <ReferralBanner />
           <View style={s.rowBetween}>
             <Text style={s.sectionTitle}>Recent Trips</Text>
             <TouchableOpacity onPress={() => navigate('Trips')}>
@@ -464,13 +554,18 @@ function HomeScreen({ navigate }: NavProp) {
 
 // ─── BOOK ─────────────────────────────────────────────────────
 function BookScreen({ navigate }: NavProp) {
-  const { setRideId, setSelectedTripId, setSearchOriginCoords, setSearchDestinationCoords } = useContext(RideContext);
+  const { setRideId, setSelectedTripId, setSearchOriginCoords, setSearchDestinationCoords, rebookRide, setRebookRide } = useContext(RideContext);
+  const { initPaymentSheet, presentPaymentSheet } = useStripe();
+  const { locations: savedLocs } = useSavedLocations();
   const [price, setPrice] = useState(40);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [note, setNote] = useState('');
+  const [seats, setSeats] = useState(1);
+  const [isShared, setIsShared] = useState(false);
   const [destination, setDestination] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const { available: driversAvailable, count: driverCount, loading: driverLoading } = useOnlineDriverCount();
 
   const [pickupCoords, setPickupCoords] = useState<LatLng | null>(null);
   const [pickupAddress, setPickupAddress] = useState<string>('Detecting location…');
@@ -479,6 +574,8 @@ function BookScreen({ navigate }: NavProp) {
   const [destinationCoords, setDestinationCoords] = useState<LatLng | null>(null);
   const [routeInfo, setRouteInfo] = useState<RouteInfo | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Prevents priceRec effect from overwriting the price restored from a rebook
+  const rebookPriceAppliedRef = useRef(false);
 
   // Detect user location on mount
   useEffect(() => {
@@ -499,6 +596,23 @@ function BookScreen({ navigate }: NavProp) {
     })();
   }, []);
 
+  // Pre-fill from a rebookedRide coming from TripsScreen
+  useEffect(() => {
+    if (!rebookRide) return;
+    setDestination(rebookRide.destination_address);
+    if (rebookRide.destination_lat && rebookRide.destination_lng) {
+      setDestinationCoords({ lat: rebookRide.destination_lat, lng: rebookRide.destination_lng });
+    }
+    if (rebookRide.pickup_lat && rebookRide.pickup_lng) {
+      setPickupCoords({ lat: rebookRide.pickup_lat, lng: rebookRide.pickup_lng });
+      setPickupStatus('ok');
+    }
+    setPickupAddress(rebookRide.pickup_address);
+    setPrice(rebookRide.offered_price);
+    rebookPriceAppliedRef.current = true;
+    setRebookRide(null);
+  }, [rebookRide]);
+
   // Compute route whenever both endpoints are known
   useEffect(() => {
     if (!pickupCoords || !destinationCoords) {
@@ -511,13 +625,18 @@ function BookScreen({ navigate }: NavProp) {
     })();
   }, [pickupCoords?.lat, pickupCoords?.lng, destinationCoords?.lat, destinationCoords?.lng]);
 
-  // Auto-suggest fare once route is known
-  const [suggestedPrice, setSuggestedPrice] = useState<number | null>(null);
+  // Smart price recommendation once route is known
+  const [priceRec, setPriceRec] = useState<PriceRecommendation | null>(null);
   useEffect(() => {
-    if (!routeInfo) { setSuggestedPrice(null); return; }
-    const s = Math.max(8, Math.round(5 + routeInfo.distance_mi * 2.5 + routeInfo.eta_min * 0.2));
-    setSuggestedPrice(s);
-    setPrice(s);
+    if (!routeInfo) { setPriceRec(null); return; }
+    const rec = calculatePriceRecommendation(routeInfo.distance_mi, routeInfo.eta_min);
+    setPriceRec(rec);
+    if (rebookPriceAppliedRef.current) {
+      // Keep the rebook price; clear the guard for future manual route changes
+      rebookPriceAppliedRef.current = false;
+    } else {
+      setPrice(rec.suggested);
+    }
   }, [routeInfo?.distance_mi, routeInfo?.eta_min]);
 
   // Find matching driver-posted trips when both endpoints are known
@@ -556,14 +675,15 @@ function BookScreen({ navigate }: NavProp) {
     setDestinationCoords(coords);
   };
 
-  const base = suggestedPrice ?? 40;
-  const priceColor = price >= base ? GREEN : price >= Math.round(base * 0.85) ? AMBER : RED;
-  const priceLabel =
-    price >= base ? 'Great offer — drivers will accept ✓' :
-    price >= Math.round(base * 0.85) ? 'Might get drivers' :
-    'Low — few drivers may accept';
+  const priceColor = getPriceColor(price, priceRec, GREEN, AMBER, RED);
+  const priceLabel = getPriceLabel(price, priceRec);
+  const PRICE_MAX = 150;
+  const fillFlex = (price - 1) / (PRICE_MAX - 1);
 
-  const fillFlex = (price - 1) / 99;
+  // Shared pricing: driver's car has 4 seats, so per-seat = full_price ÷ 4.
+  // Passenger pays (price ÷ 4) × seats_they_need.
+  const perSeatPrice = price / 4;
+  const sharedTotal = isShared ? Math.round(perSeatPrice * seats) : price;
 
   const submitDisabled = submitting || !(pickupCoords && destinationCoords && routeInfo);
   const helperText =
@@ -573,9 +693,47 @@ function BookScreen({ navigate }: NavProp) {
     null;
 
   const submitRequest = async () => {
-    if (submitDisabled || !pickupCoords || !destinationCoords || !routeInfo) return;
+    console.log('[BookScreen] submitRequest called', {
+      submitDisabled,
+      pickupCoords,
+      destinationCoords: destinationCoords ? `${destinationCoords.lat},${destinationCoords.lng}` : null,
+      hasRouteInfo: !!routeInfo,
+      driverLoading,
+      driversAvailable,
+      driverCount,
+    });
+
+    if (submitDisabled || !pickupCoords || !destinationCoords || !routeInfo) {
+      console.log('[BookScreen] submitRequest EARLY RETURN — guard failed', {
+        submitDisabled,
+        hasPickup: !!pickupCoords,
+        hasDestination: !!destinationCoords,
+        hasRoute: !!routeInfo,
+      });
+      return;
+    }
+
+    // Fast-path: hook already knows driver availability — no network round-trip needed
+    if (!driverLoading && !driversAvailable) {
+      console.log('[BookScreen] submitRequest EARLY RETURN — no drivers (fast-path)');
+      Alert.alert('No drivers available', 'No drivers are online right now. Please check back shortly.');
+      return;
+    }
+
+    let rideId: string | null = null;
     try {
       setSubmitting(true);
+
+      // Final server-side confirmation before creating the ride
+      let onlineCount = driverCount;
+      try { onlineCount = await countOnlineDrivers(); } catch { /* use cached count */ }
+      console.log('[BookScreen] online driver count:', onlineCount);
+      if (onlineCount === 0) {
+        console.log('[BookScreen] submitRequest EARLY RETURN — onlineCount is 0');
+        Alert.alert('No drivers available', 'No drivers are online right now. Please check back shortly.');
+        return;
+      }
+
       haptic.notify(Haptics.NotificationFeedbackType.Success);
       const ride = await createRide({
         pickup_address: pickupAddress,
@@ -584,17 +742,59 @@ function BookScreen({ navigate }: NavProp) {
         destination_address: destination,
         destination_lat: destinationCoords.lat,
         destination_lng: destinationCoords.lng,
-        offered_price: price,
+        offered_price: sharedTotal,
         distance_mi: routeInfo.distance_mi,
         eta_min: routeInfo.eta_min,
         payment_method: paymentMethod,
         passenger_note: note.trim() || null,
+        seats,
+        is_shared: isShared,
+        full_price: isShared ? price : undefined,
       });
+      rideId = ride.id;
+
+      if (isShared && destinationCoords) {
+        joinOrCreateSharedGroup(ride.id, seats, destinationCoords.lat, destinationCoords.lng).catch(() => {});
+      }
+
+      if (paymentMethod === 'card') {
+        const clientSecret = await createRidePaymentIntent(ride.id);
+        const { error: initErr } = await initPaymentSheet({
+          merchantDisplayName: 'ATEE Rideshare',
+          paymentIntentClientSecret: clientSecret,
+        });
+        if (initErr) throw new Error(initErr.message);
+        const { error: presentErr } = await presentPaymentSheet();
+        if (presentErr) {
+          // Void the PI and cancel the ride — no charge was taken
+          await cancelAndRefundRide(ride.id).catch(() => cancelRide(ride.id).catch(() => {}));
+          if (presentErr.code !== 'Canceled') {
+            Alert.alert('Payment failed', presentErr.message);
+          }
+          return;
+        }
+      }
+
       setRideId(ride.id);
+
+      // Fire-and-forget: notify all online drivers about the new ride request
+      supabase
+        .from('drivers')
+        .select('user_id')
+        .eq('is_online', true)
+        .then(({ data: onlineDrivers }) => {
+          const driverIds = (onlineDrivers ?? []).map((d: { user_id: string }) => d.user_id);
+          if (driverIds.length > 0) {
+            notifyUsers(driverIds, 'New ride request', `Pickup: ${pickupAddress} → ${destination}. Offered: $${price}`);
+          }
+        });
+
       navigate('Matching');
     } catch (e: any) {
-      console.warn('[BookScreen] createRide failed', e?.message ?? e);
+      console.warn('[BookScreen] submitRequest failed', e?.message ?? e);
       haptic.notify(Haptics.NotificationFeedbackType.Error);
+      if (rideId) await cancelAndRefundRide(rideId).catch(() => cancelRide(rideId!).catch(() => {}));
+      Alert.alert('Error', e?.message ?? 'Could not create ride.');
     } finally {
       setSubmitting(false);
     }
@@ -607,6 +807,22 @@ function BookScreen({ navigate }: NavProp) {
         <ScrollView contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
           <View style={{ marginBottom: 12 }}>
             <MapView origin={pickupCoords} destination={destinationCoords} height={180} />
+          </View>
+
+          {/* Share toggle — set sharing preference before entering address */}
+          <View style={[s.card, { flexDirection: 'row', alignItems: 'center', marginBottom: 12 }]}>
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={s.cardLabel}>SHARE THIS RIDE?</Text>
+              <Text style={[s.muted, { fontSize: 12, marginTop: 2 }]}>
+                {isShared ? "Split cost with others going your way" : "Ride alone — pay full price"}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={{ width: 50, height: 28, borderRadius: 14, backgroundColor: isShared ? '#22c55e' : '#e0e0e0', justifyContent: 'center', paddingHorizontal: 3 }}
+              onPress={() => { haptic.select(); setIsShared((v) => !v); }}
+            >
+              <View style={{ width: 22, height: 22, borderRadius: 11, backgroundColor: 'white', alignSelf: isShared ? 'flex-end' : 'flex-start' }} />
+            </TouchableOpacity>
           </View>
 
           <View style={s.card}>
@@ -642,6 +858,26 @@ function BookScreen({ navigate }: NavProp) {
                 ))}
               </View>
             )}
+            {savedLocs.length > 0 && !destinationCoords && (
+              <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+                {savedLocs.map((loc) => (
+                  <TouchableOpacity
+                    key={loc.id}
+                    style={s.savedLocChip}
+                    onPress={() => {
+                      haptic.select();
+                      setDestination(loc.address);
+                      setDestinationCoords({ lat: loc.lat, lng: loc.lng });
+                      setShowSuggestions(false);
+                    }}
+                  >
+                    <Text style={s.savedLocChipText}>
+                      {loc.label === 'home' ? '🏠' : loc.label === 'work' ? '🏢' : '📍'} {loc.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
           </View>
 
           <RouteCard
@@ -650,6 +886,16 @@ function BookScreen({ navigate }: NavProp) {
             eta={routeInfo ? `${routeInfo.eta_min} min` : '—'}
             distance={routeInfo ? `${routeInfo.distance_mi} mi` : '—'}
           />
+
+          {!driverLoading && !driversAvailable && (
+            <View style={s.noDriverBanner}>
+              <Ionicons name="car-outline" size={20} color="#c2410c" />
+              <View style={{ flex: 1 }}>
+                <Text style={s.noDriverBannerTitle}>No drivers online right now</Text>
+                <Text style={s.noDriverBannerSub}>Check back in a few minutes — drivers come on throughout the day.</Text>
+              </View>
+            </View>
+          )}
 
           <View style={s.statRow}>
             <View style={s.statBox}>
@@ -661,8 +907,10 @@ function BookScreen({ navigate }: NavProp) {
               <Text style={s.statValue}>{routeInfo ? `${routeInfo.distance_mi} MI` : '—'}</Text>
             </View>
             <View style={s.statBox}>
-              <Text style={s.statLabel}>Nearby</Text>
-              <Text style={[s.statValue, { color: GREEN }]}>8 🚗</Text>
+              <Text style={s.statLabel}>Drivers</Text>
+              <Text style={[s.statValue, { color: driversAvailable ? GREEN : AMBER }]}>
+                {driverLoading ? '…' : driverCount === 0 ? 'None' : `${driverCount} 🚗`}
+              </Text>
             </View>
           </View>
 
@@ -693,9 +941,35 @@ function BookScreen({ navigate }: NavProp) {
           )}
 
           <View style={s.pricingCard}>
-            <Text style={s.pricingTitle}>Set your price.</Text>
-            <Text style={s.pricingSub}>Higher bid = faster match.</Text>
-            <Text style={[s.priceBig, { textAlign: 'center', marginVertical: 14 }]}>${price}</Text>
+            <View style={s.rowBetween}>
+              <Text style={s.pricingTitle}>Set your price.</Text>
+              {routeInfo && (
+                <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12 }}>
+                  {priceRec ? `${priceRec.distanceKm} km` : `${routeInfo.distance_mi} mi`} · {routeInfo.eta_min} min
+                </Text>
+              )}
+            </View>
+
+            {priceRec && (
+              <View style={s.priceRangeRow}>
+                <Text style={s.priceRangeLabel}>ATEE range</Text>
+                <TouchableOpacity
+                  onPress={() => { haptic.select(); setPrice(priceRec.suggested); }}
+                  style={s.priceRangePill}
+                >
+                  <Text style={s.priceRangePillText}>
+                    ${priceRec.min} – ${priceRec.max}{'  ·  '}tap to reset ${priceRec.suggested}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            <Text style={[s.priceBig, { textAlign: 'center', marginVertical: 10 }]}>${sharedTotal}</Text>
+            {isShared && (
+              <Text style={{ textAlign: 'center', color: 'rgba(255,255,255,0.65)', fontSize: 12, marginTop: -6, marginBottom: 6 }}>
+                ${perSeatPrice.toFixed(2)}/seat × {seats} seat{seats > 1 ? 's' : ''} = ${sharedTotal}
+              </Text>
+            )}
 
             <View style={s.sliderTrack}>
               <View style={{ flex: fillFlex, height: 6, backgroundColor: priceColor, borderRadius: 3 }} />
@@ -711,28 +985,38 @@ function BookScreen({ navigate }: NavProp) {
               </TouchableOpacity>
               <View style={{ flex: 1, alignItems: 'center' }}>
                 <Text style={[s.priceStatusLabel, { color: priceColor }]}>{priceLabel}</Text>
-                <Text style={s.priceRec}>
-                  {suggestedPrice ? `Suggested for this route: $${suggestedPrice}` : 'Higher bid = faster match'}
-                </Text>
               </View>
               <TouchableOpacity
                 style={s.priceBtn}
-                onPress={() => { haptic.select(); setPrice((p) => Math.min(100, p + 1)); }}
+                onPress={() => { haptic.select(); setPrice((p) => Math.min(PRICE_MAX, p + 1)); }}
               >
                 <Text style={s.priceBtnText}>+</Text>
               </TouchableOpacity>
             </View>
 
             <View style={[s.tabRow, { marginTop: 14 }]}>
-              {(['cash', 'etransfer'] as PaymentMethod[]).map((m) => (
+              {(['cash', 'etransfer', ...(Platform.OS !== 'web' ? ['card'] : [])] as PaymentMethod[]).map((m) => (
                 <TouchableOpacity
                   key={m}
                   style={[s.payMethodBtn, paymentMethod === m && s.payMethodBtnActive]}
                   onPress={() => { haptic.select(); setPaymentMethod(m); }}
                 >
                   <Text style={[s.payMethodText, paymentMethod === m && s.payMethodTextActive]}>
-                    {m === 'cash' ? '💵 Cash' : '📱 E-transfer'}
+                    {m === 'cash' ? '💵 Cash' : m === 'etransfer' ? '📱 E-transfer' : '💳 Card'}
                   </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <Text style={[s.cardLabel, { marginTop: 14 }]}>SEATS NEEDED</Text>
+            <View style={[s.tabRow, { marginTop: 6 }]}>
+              {([1, 2, 3, 4] as const).map((n) => (
+                <TouchableOpacity
+                  key={n}
+                  style={[s.payMethodBtn, seats === n && s.payMethodBtnActive]}
+                  onPress={() => { haptic.select(); setSeats(n); }}
+                >
+                  <Text style={[s.payMethodText, seats === n && s.payMethodTextActive]}>{n}</Text>
                 </TouchableOpacity>
               ))}
             </View>
@@ -771,13 +1055,211 @@ function BookScreen({ navigate }: NavProp) {
 }
 
 // ─── MATCHING ─────────────────────────────────────────────────
+const MATCH_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
+
+// Sub-component: one counter-offer card shown to the passenger on MatchingScreen.
+function NegotiationOfferCard({
+  negotiations,
+  rideId,
+  passengerId,
+  onAccepted,
+}: {
+  negotiations: RideNegotiation[];   // full thread for this driver
+  rideId: string;
+  passengerId: string;
+  onAccepted: () => void;
+}) {
+  const driverId = negotiations[0]?.driver_id ?? '';
+  const latest = negotiations[negotiations.length - 1];
+  const { profile: driverProfile } = useUserProfile(driverId);
+  const [acting, setActing] = useState(false);
+  const [showCounter, setShowCounter] = useState(false);
+  const [counterText, setCounterText] = useState('');
+
+  // Latest pending offer from driver side
+  const latestDriverOffer = [...negotiations].reverse().find(
+    (n) => n.created_by === 'driver' && n.status === 'pending',
+  );
+  // Latest pending offer from passenger side (our counter-counter)
+  const latestPassengerOffer = [...negotiations].reverse().find(
+    (n) => n.created_by === 'passenger' && n.status === 'pending',
+  );
+
+  const handleAccept = async () => {
+    if (!latestDriverOffer || acting) return;
+    try {
+      setActing(true);
+      haptic.notify(Haptics.NotificationFeedbackType.Success);
+      await acceptNegotiation(latestDriverOffer.id);
+      onAccepted();
+    } catch (e: any) {
+      Alert.alert('Error', e?.message ?? 'Could not accept offer');
+      setActing(false);
+    }
+  };
+
+  const handleDecline = async () => {
+    if (!latestDriverOffer || acting) return;
+    try {
+      setActing(true);
+      haptic.impact();
+      await declineNegotiation(latestDriverOffer.id);
+    } catch (e: any) {
+      Alert.alert('Error', e?.message ?? 'Could not decline offer');
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const handleCounter = async () => {
+    const val = parseFloat(counterText);
+    if (!val || val <= 0) { Alert.alert('Enter a valid price'); return; }
+    if (!latestDriverOffer || acting) return;
+    try {
+      setActing(true);
+      haptic.select();
+      const nextRound = latest.round + 1;
+      await sendPassengerCounter(rideId, driverId, val, nextRound);
+      setShowCounter(false);
+      setCounterText('');
+    } catch (e: any) {
+      Alert.alert('Error', e?.message ?? 'Could not send counter');
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const isDeclinedOrCancelled =
+    latestDriverOffer === undefined &&
+    negotiations.some((n) => n.created_by === 'driver' && (n.status === 'declined' || n.status === 'cancelled'));
+
+  if (isDeclinedOrCancelled) return null;
+
+  return (
+    <View style={{ backgroundColor: 'white', borderRadius: 14, padding: 14, marginBottom: 10 }}>
+      {/* Thread history */}
+      {negotiations.map((n) => (
+        <View
+          key={n.id}
+          style={{
+            flexDirection: 'row',
+            justifyContent: n.created_by === 'driver' ? 'flex-start' : 'flex-end',
+            marginBottom: 6,
+          }}
+        >
+          <View
+            style={{
+              backgroundColor: n.created_by === 'driver' ? '#f3f4f6' : '#fee2e2',
+              borderRadius: 10,
+              paddingHorizontal: 10,
+              paddingVertical: 6,
+              maxWidth: '75%',
+            }}
+          >
+            <Text style={{ fontSize: 13, fontWeight: '700', color: n.created_by === 'driver' ? '#111' : RED }}>
+              ${n.offered_price.toFixed(2)}
+            </Text>
+            <Text style={{ fontSize: 10, color: '#888', marginTop: 1 }}>
+              {n.created_by === 'driver'
+                ? (driverProfile?.full_name ?? 'Driver')
+                : 'You'}{' '}
+              · Round {n.round}
+              {n.status !== 'pending' ? ` · ${n.status}` : ''}
+            </Text>
+          </View>
+        </View>
+      ))}
+
+      {/* Actions — only shown when there's a pending driver offer and no pending passenger counter yet */}
+      {latestDriverOffer && !latestPassengerOffer && (
+        <>
+          <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+            <TouchableOpacity
+              style={{ flex: 1, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: '#e0e0e0', alignItems: 'center' }}
+              onPress={handleDecline}
+              disabled={acting}
+            >
+              <Text style={{ fontSize: 13, color: '#666' }}>✗ Decline</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={{ flex: 1, paddingVertical: 8, borderRadius: 8, borderWidth: 1, borderColor: RED, alignItems: 'center' }}
+              onPress={() => setShowCounter((v) => !v)}
+              disabled={acting}
+            >
+              <Text style={{ fontSize: 13, color: RED }}>↕ Counter</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={{ flex: 1, paddingVertical: 8, borderRadius: 8, backgroundColor: GREEN, alignItems: 'center' }}
+              onPress={handleAccept}
+              disabled={acting}
+            >
+              {acting
+                ? <ActivityIndicator size="small" color="white" />
+                : <Text style={{ fontSize: 13, color: 'white', fontWeight: '700' }}>✓ Accept</Text>}
+            </TouchableOpacity>
+          </View>
+          {showCounter && (
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+              <TextInput
+                style={{ flex: 1, borderWidth: 1, borderColor: '#e0e0e0', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, fontSize: 14 }}
+                placeholder="Your price ($)"
+                keyboardType="decimal-pad"
+                value={counterText}
+                onChangeText={setCounterText}
+                returnKeyType="send"
+                onSubmitEditing={handleCounter}
+              />
+              <TouchableOpacity
+                style={{ paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8, backgroundColor: RED, alignItems: 'center', justifyContent: 'center' }}
+                onPress={handleCounter}
+                disabled={acting}
+              >
+                <Text style={{ color: 'white', fontWeight: '700', fontSize: 13 }}>Send</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </>
+      )}
+
+      {/* Waiting indicator when we countered and waiting for driver response */}
+      {latestPassengerOffer && (
+        <Text style={{ fontSize: 12, color: '#888', textAlign: 'center', marginTop: 8 }}>
+          Waiting for driver response…
+        </Text>
+      )}
+    </View>
+  );
+}
+
 function MatchingScreen({ navigate }: NavProp) {
   const { rideId, setRideId } = useContext(RideContext);
   const { bids } = useRideBids(rideId);
+  const { ride, status: rideStatus } = useRideStatus(rideId);
+  const allNegotiations = useRideNegotiations(rideId);
   const [dots, setDots] = useState('');
+  const [secondsLeft, setSecondsLeft] = useState(MATCH_TIMEOUT_MS / 1000);
+  const timedOutRef = useRef(false);
   const scale = useRef(new Animated.Value(1)).current;
 
-  // Pulse animation
+  // When passenger accepts a negotiation, ride becomes driver_assigned → go to Confirmed
+  useEffect(() => {
+    if (rideStatus === 'driver_assigned') {
+      haptic.notify(Haptics.NotificationFeedbackType.Success);
+      navigate('Confirmed');
+    }
+  }, [rideStatus]);
+
+  // Group negotiations by driver_id for the multi-driver panel
+  const negotiationsByDriver = allNegotiations.reduce<Record<string, RideNegotiation[]>>(
+    (acc, n) => { (acc[n.driver_id] ??= []).push(n); return acc; },
+    {},
+  );
+  // Only show drivers with at least one pending driver-side offer
+  const activeDriverIds = Object.keys(negotiationsByDriver).filter((dId) =>
+    negotiationsByDriver[dId].some((n) => n.created_by === 'driver' && n.status === 'pending'),
+  );
+
+  // Pulse animation + dot timer
   useEffect(() => {
     Animated.loop(
       Animated.sequence([
@@ -802,40 +1284,100 @@ function MatchingScreen({ navigate }: NavProp) {
     }
   }, [bids.length]);
 
-  const handleCancel = async () => {
+  const cancelAndReturn = useCallback(async (showTimeout: boolean) => {
+    if (timedOutRef.current) return; // prevent double-fire
+    timedOutRef.current = true;
     if (rideId) {
-      try { await cancelRide(rideId); } catch (e) { console.warn('cancel failed', e); }
+      try {
+        await cancelAndRefundRide(rideId);
+      } catch {
+        try { await cancelRide(rideId); } catch {}
+      }
     }
     setRideId(null);
-    navigate('Home');
-  };
+    if (showTimeout) {
+      Alert.alert(
+        'No drivers available',
+        'No drivers accepted your request. Try again shortly.',
+        [{ text: 'OK', onPress: () => navigate('Home') }],
+      );
+    } else {
+      navigate('Home');
+    }
+  }, [rideId]);
+
+  // 2-minute countdown — auto-cancel when it hits zero
+  useEffect(() => {
+    if (bids.length > 0) return; // driver found, stop ticking
+    const tick = setInterval(() => {
+      setSecondsLeft((s) => {
+        if (s <= 1) {
+          clearInterval(tick);
+          cancelAndReturn(true);
+          return 0;
+        }
+        return s - 1;
+      });
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [bids.length, cancelAndReturn]);
+
+  const mins = Math.floor(secondsLeft / 60);
+  const secs = secondsLeft % 60;
+  const timeLabel = `${mins}:${String(secs).padStart(2, '0')}`;
 
   return (
     <ScreenTransition>
       <SafeAreaView style={{ flex: 1, backgroundColor: RED }}>
         <StatusBar barStyle="light-content" />
-        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 }}>
-          <Animated.View style={[s.pulseRing, { transform: [{ scale }] }]} />
-          <View style={s.pulseInner}>
-            <Text style={{ fontSize: 34 }}>📡</Text>
-          </View>
-          <Text style={s.matchTitle}>Notifying drivers{dots}</Text>
-          <Text style={s.matchSub}>Your price has been broadcast to nearby drivers</Text>
-          {bids.length > 0 && (
-            <View style={s.matchBadge}>
-              <Text style={s.matchBadgeText}>
-                {bids.length} driver{bids.length > 1 ? 's' : ''} accepted your price 🎉
+        <ScrollView
+          contentContainerStyle={{ flexGrow: 1 }}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={{ alignItems: 'center', justifyContent: 'center', padding: 32, paddingBottom: 16 }}>
+            <Animated.View style={[s.pulseRing, { transform: [{ scale }] }]} />
+            <View style={s.pulseInner}>
+              <Text style={{ fontSize: 34 }}>📡</Text>
+            </View>
+            <Text style={s.matchTitle}>Notifying drivers{dots}</Text>
+            <Text style={s.matchSub}>Your price has been broadcast to nearby drivers</Text>
+            {bids.length > 0 ? (
+              <View style={s.matchBadge}>
+                <Text style={s.matchBadgeText}>
+                  {bids.length} driver{bids.length > 1 ? 's' : ''} accepted your price 🎉
+                </Text>
+              </View>
+            ) : (
+              <View style={s.matchBadge}>
+                <Text style={s.matchBadgeText}>Auto-cancels in {timeLabel}</Text>
+              </View>
+            )}
+            <Text style={s.matchNote}>Average wait: 45 seconds</Text>
+            <TouchableOpacity style={{ marginTop: 20 }} onPress={() => cancelAndReturn(false)}>
+              <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, textDecorationLine: 'underline' }}>
+                Cancel request
               </Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Counter-offer panel — appears as drivers send negotiation offers */}
+          {activeDriverIds.length > 0 && (
+            <View style={{ backgroundColor: 'rgba(255,255,255,0.08)', marginHorizontal: 16, borderRadius: 16, padding: 14, marginBottom: 16 }}>
+              <Text style={{ color: 'white', fontWeight: '700', fontSize: 14, marginBottom: 10 }}>
+                💬 {activeDriverIds.length} counter offer{activeDriverIds.length > 1 ? 's' : ''} received
+              </Text>
+              {activeDriverIds.map((dId) => (
+                <NegotiationOfferCard
+                  key={dId}
+                  negotiations={negotiationsByDriver[dId]}
+                  rideId={rideId!}
+                  passengerId={ride?.passenger_id ?? ''}
+                  onAccepted={() => navigate('Confirmed')}
+                />
+              ))}
             </View>
           )}
-          <Text style={s.matchNote}>Average wait: 45 seconds</Text>
-
-          <TouchableOpacity style={{ marginTop: 28 }} onPress={handleCancel}>
-            <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, textDecorationLine: 'underline' }}>
-              Cancel request
-            </Text>
-          </TouchableOpacity>
-        </View>
+        </ScrollView>
       </SafeAreaView>
     </ScreenTransition>
   );
@@ -844,14 +1386,18 @@ function MatchingScreen({ navigate }: NavProp) {
 // ─── SCHEDULE ─────────────────────────────────────────────────
 function ScheduleScreen({ navigate }: NavProp) {
   const { setRideId } = useContext(RideContext);
+  const { initPaymentSheet, presentPaymentSheet } = useStripe();
   const [price, setPrice] = useState(40);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [note, setNote] = useState('');
+  const [seats, setSeats] = useState(1);
+  const [isShared, setIsShared] = useState(false);
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [selectedTime, setSelectedTime] = useState(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showTimePicker, setShowTimePicker] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const { available: driversAvailable, count: driverCount, loading: driverLoading } = useOnlineDriverCount();
 
   const [destination, setDestination] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -892,12 +1438,12 @@ function ScheduleScreen({ navigate }: NavProp) {
     })();
   }, [pickupCoords?.lat, pickupCoords?.lng, destinationCoords?.lat, destinationCoords?.lng]);
 
-  const [suggestedPrice, setSuggestedPrice] = useState<number | null>(null);
+  const [priceRec, setPriceRec] = useState<PriceRecommendation | null>(null);
   useEffect(() => {
-    if (!routeInfo) { setSuggestedPrice(null); return; }
-    const s = Math.max(8, Math.round(5 + routeInfo.distance_mi * 2.5 + routeInfo.eta_min * 0.2));
-    setSuggestedPrice(s);
-    setPrice(s);
+    if (!routeInfo) { setPriceRec(null); return; }
+    const rec = calculatePriceRecommendation(routeInfo.distance_mi, routeInfo.eta_min);
+    setPriceRec(rec);
+    setPrice(rec.suggested);
   }, [routeInfo?.distance_mi, routeInfo?.eta_min]);
 
   const onDestChange = (text: string) => {
@@ -922,13 +1468,13 @@ function ScheduleScreen({ navigate }: NavProp) {
     setDestinationCoords(coords);
   };
 
-  const base = suggestedPrice ?? 40;
-  const priceColor = price >= base ? GREEN : price >= Math.round(base * 0.85) ? AMBER : RED;
-  const priceLabel =
-    price >= base ? 'Great offer — drivers will accept ✓' :
-    price >= Math.round(base * 0.85) ? 'Might get drivers' :
-    'Low — few drivers may accept';
-  const fillFlex = (price - 1) / 99;
+  const priceColor = getPriceColor(price, priceRec, GREEN, AMBER, RED);
+  const priceLabel = getPriceLabel(price, priceRec);
+  const PRICE_MAX = 150;
+  const fillFlex = (price - 1) / (PRICE_MAX - 1);
+
+  const perSeatPrice = price / 4;
+  const sharedTotal = isShared ? Math.round(perSeatPrice * seats) : price;
 
   const submitDisabled = submitting || !(pickupCoords && destinationCoords && routeInfo);
   const helperText =
@@ -938,9 +1484,45 @@ function ScheduleScreen({ navigate }: NavProp) {
     null;
 
   const submit = async () => {
-    if (submitDisabled || !pickupCoords || !destinationCoords || !routeInfo) return;
+    console.log('[ScheduleScreen] submit called', {
+      submitDisabled,
+      pickupCoords,
+      destinationCoords: destinationCoords ? `${destinationCoords.lat},${destinationCoords.lng}` : null,
+      hasRouteInfo: !!routeInfo,
+      driverLoading,
+      driversAvailable,
+      driverCount,
+    });
+
+    if (submitDisabled || !pickupCoords || !destinationCoords || !routeInfo) {
+      console.log('[ScheduleScreen] submit EARLY RETURN — guard failed', {
+        submitDisabled,
+        hasPickup: !!pickupCoords,
+        hasDestination: !!destinationCoords,
+        hasRoute: !!routeInfo,
+      });
+      return;
+    }
+
+    if (!driverLoading && !driversAvailable) {
+      console.log('[ScheduleScreen] submit EARLY RETURN — no drivers (fast-path)');
+      Alert.alert('No drivers available', 'No drivers are online right now. Please check back shortly.');
+      return;
+    }
+
+    let rideId: string | null = null;
     try {
       setSubmitting(true);
+
+      let onlineCount = driverCount;
+      try { onlineCount = await countOnlineDrivers(); } catch { /* use cached count */ }
+      console.log('[ScheduleScreen] online driver count:', onlineCount);
+      if (onlineCount === 0) {
+        console.log('[ScheduleScreen] submit EARLY RETURN — onlineCount is 0');
+        Alert.alert('No drivers available', 'No drivers are online right now. Please check back shortly.');
+        return;
+      }
+
       haptic.notify(Haptics.NotificationFeedbackType.Success);
       const when = new Date(selectedDate);
       when.setHours(selectedTime.getHours(), selectedTime.getMinutes(), 0, 0);
@@ -951,18 +1533,57 @@ function ScheduleScreen({ navigate }: NavProp) {
         destination_address: destination,
         destination_lat: destinationCoords.lat,
         destination_lng: destinationCoords.lng,
-        offered_price: price,
+        offered_price: sharedTotal,
         distance_mi: routeInfo.distance_mi,
         eta_min: routeInfo.eta_min,
         scheduled_for: when.toISOString(),
         payment_method: paymentMethod,
         passenger_note: note.trim() || null,
+        seats,
+        is_shared: isShared,
+        full_price: isShared ? price : undefined,
       });
+      rideId = ride.id;
+
+      if (isShared && destinationCoords) {
+        joinOrCreateSharedGroup(ride.id, seats, destinationCoords.lat, destinationCoords.lng).catch(() => {});
+      }
+
+      if (paymentMethod === 'card') {
+        const clientSecret = await createRidePaymentIntent(ride.id);
+        const { error: initErr } = await initPaymentSheet({
+          merchantDisplayName: 'ATEE Rideshare',
+          paymentIntentClientSecret: clientSecret,
+        });
+        if (initErr) throw new Error(initErr.message);
+        const { error: presentErr } = await presentPaymentSheet();
+        if (presentErr) {
+          await cancelAndRefundRide(ride.id).catch(() => cancelRide(ride.id).catch(() => {}));
+          if (presentErr.code !== 'Canceled') Alert.alert('Payment failed', presentErr.message);
+          return;
+        }
+      }
+
       setRideId(ride.id);
+
+      // Fire-and-forget: notify online drivers
+      supabase
+        .from('drivers')
+        .select('user_id')
+        .eq('is_online', true)
+        .then(({ data: onlineDrivers }) => {
+          const driverIds = (onlineDrivers ?? []).map((d: { user_id: string }) => d.user_id);
+          if (driverIds.length > 0) {
+            notifyUsers(driverIds, 'New ride request', `Pickup: ${pickupAddress} → ${destination}. Offered: $${price}`);
+          }
+        });
+
       navigate('Matching');
     } catch (e: any) {
       console.warn('[ScheduleScreen] createRide failed', e?.message ?? e);
       haptic.notify(Haptics.NotificationFeedbackType.Error);
+      if (rideId) await cancelAndRefundRide(rideId).catch(() => cancelRide(rideId!).catch(() => {}));
+      Alert.alert('Error', e?.message ?? 'Could not schedule ride.');
     } finally {
       setSubmitting(false);
     }
@@ -975,6 +1596,22 @@ function ScheduleScreen({ navigate }: NavProp) {
         <ScrollView contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
           <View style={{ marginBottom: 12 }}>
             <MapView origin={pickupCoords} destination={destinationCoords} height={180} />
+          </View>
+
+          {/* Share toggle — set sharing preference before entering address */}
+          <View style={[s.card, { flexDirection: 'row', alignItems: 'center', marginBottom: 12 }]}>
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={s.cardLabel}>SHARE THIS RIDE?</Text>
+              <Text style={[s.muted, { fontSize: 12, marginTop: 2 }]}>
+                {isShared ? "Split cost with others going your way" : "Ride alone — pay full price"}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={{ width: 50, height: 28, borderRadius: 14, backgroundColor: isShared ? '#22c55e' : '#e0e0e0', justifyContent: 'center', paddingHorizontal: 3 }}
+              onPress={() => { haptic.select(); setIsShared((v) => !v); }}
+            >
+              <View style={{ width: 22, height: 22, borderRadius: 11, backgroundColor: 'white', alignSelf: isShared ? 'flex-end' : 'flex-start' }} />
+            </TouchableOpacity>
           </View>
 
           <View style={s.card}>
@@ -1019,6 +1656,16 @@ function ScheduleScreen({ navigate }: NavProp) {
             distance={routeInfo ? `${routeInfo.distance_mi} mi` : '—'}
           />
 
+          {!driverLoading && !driversAvailable && (
+            <View style={s.noDriverBanner}>
+              <Ionicons name="car-outline" size={20} color="#c2410c" />
+              <View style={{ flex: 1 }}>
+                <Text style={s.noDriverBannerTitle}>No drivers online right now</Text>
+                <Text style={s.noDriverBannerSub}>Check back in a few minutes — drivers come on throughout the day.</Text>
+              </View>
+            </View>
+          )}
+
           <View style={s.tabRow}>
             <TouchableOpacity style={s.tabInactive} onPress={() => navigate('Book')}>
               <Text style={s.tabInactiveText}>Instant</Text>
@@ -1038,9 +1685,35 @@ function ScheduleScreen({ navigate }: NavProp) {
           </TouchableOpacity>
 
           <View style={s.pricingCard}>
-            <Text style={s.pricingTitle}>Set your price.</Text>
-            <Text style={s.pricingSub}>Higher bid = faster match.</Text>
-            <Text style={[s.priceBig, { textAlign: 'center', marginVertical: 14 }]}>${price}</Text>
+            <View style={s.rowBetween}>
+              <Text style={s.pricingTitle}>Set your price.</Text>
+              {routeInfo && (
+                <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12 }}>
+                  {priceRec ? `${priceRec.distanceKm} km` : `${routeInfo.distance_mi} mi`} · {routeInfo.eta_min} min
+                </Text>
+              )}
+            </View>
+
+            {priceRec && (
+              <View style={s.priceRangeRow}>
+                <Text style={s.priceRangeLabel}>ATEE range</Text>
+                <TouchableOpacity
+                  onPress={() => { haptic.select(); setPrice(priceRec.suggested); }}
+                  style={s.priceRangePill}
+                >
+                  <Text style={s.priceRangePillText}>
+                    ${priceRec.min} – ${priceRec.max}{'  ·  '}tap to reset ${priceRec.suggested}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            <Text style={[s.priceBig, { textAlign: 'center', marginVertical: 10 }]}>${sharedTotal}</Text>
+            {isShared && (
+              <Text style={{ textAlign: 'center', color: 'rgba(255,255,255,0.65)', fontSize: 12, marginTop: -6, marginBottom: 6 }}>
+                ${perSeatPrice.toFixed(2)}/seat × {seats} seat{seats > 1 ? 's' : ''} = ${sharedTotal}
+              </Text>
+            )}
 
             <View style={s.sliderTrack}>
               <View style={{ flex: fillFlex, height: 6, backgroundColor: priceColor, borderRadius: 3 }} />
@@ -1056,28 +1729,38 @@ function ScheduleScreen({ navigate }: NavProp) {
               </TouchableOpacity>
               <View style={{ flex: 1, alignItems: 'center' }}>
                 <Text style={[s.priceStatusLabel, { color: priceColor }]}>{priceLabel}</Text>
-                <Text style={s.priceRec}>
-                  {suggestedPrice ? `Suggested for this route: $${suggestedPrice}` : 'Higher bid = faster match'}
-                </Text>
               </View>
               <TouchableOpacity
                 style={s.priceBtn}
-                onPress={() => { haptic.select(); setPrice((p) => Math.min(100, p + 1)); }}
+                onPress={() => { haptic.select(); setPrice((p) => Math.min(PRICE_MAX, p + 1)); }}
               >
                 <Text style={s.priceBtnText}>+</Text>
               </TouchableOpacity>
             </View>
 
             <View style={[s.tabRow, { marginTop: 14 }]}>
-              {(['cash', 'etransfer'] as PaymentMethod[]).map((m) => (
+              {(['cash', 'etransfer', ...(Platform.OS !== 'web' ? ['card'] : [])] as PaymentMethod[]).map((m) => (
                 <TouchableOpacity
                   key={m}
                   style={[s.payMethodBtn, paymentMethod === m && s.payMethodBtnActive]}
                   onPress={() => { haptic.select(); setPaymentMethod(m); }}
                 >
                   <Text style={[s.payMethodText, paymentMethod === m && s.payMethodTextActive]}>
-                    {m === 'cash' ? '💵 Cash' : '📱 E-transfer'}
+                    {m === 'cash' ? '💵 Cash' : m === 'etransfer' ? '📱 E-transfer' : '💳 Card'}
                   </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <Text style={[s.cardLabel, { marginTop: 14 }]}>SEATS NEEDED</Text>
+            <View style={[s.tabRow, { marginTop: 6 }]}>
+              {([1, 2, 3, 4] as const).map((n) => (
+                <TouchableOpacity
+                  key={n}
+                  style={[s.payMethodBtn, seats === n && s.payMethodBtnActive]}
+                  onPress={() => { haptic.select(); setSeats(n); }}
+                >
+                  <Text style={[s.payMethodText, seats === n && s.payMethodTextActive]}>{n}</Text>
                 </TouchableOpacity>
               ))}
             </View>
@@ -1144,7 +1827,11 @@ function DriverBidRow({
   const name = bid.driver?.full_name || 'Driver';
   const rating = bid.driver?.rating?.toFixed(1) ?? '5.0';
   const trips = bid.driver?.total_trips ?? 0;
-  const { displayString } = useDriverVehicle(bid.driver_id);
+  const { vehicle, plate } = useDriverVehicle(bid.driver_id);
+
+  const vehicleLabel = vehicle?.vehicle_make && vehicle?.vehicle_model
+    ? `${vehicle.vehicle_color ? vehicle.vehicle_color + ' ' : ''}${vehicle.vehicle_make} ${vehicle.vehicle_model}`
+    : null;
 
   return (
     <TouchableOpacity
@@ -1159,8 +1846,11 @@ function DriverBidRow({
       />
       <View style={{ flex: 1 }}>
         <Text style={s.driverName}>{name}</Text>
-        {displayString ? (
-          <Text style={[s.muted, { marginBottom: 1 }]}>{displayString}</Text>
+        {vehicleLabel ? <Text style={s.muted}>{vehicleLabel}</Text> : null}
+        {plate ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 1 }}>
+            <View style={s.plateBadge}><Text style={s.plateBadgeText}>{plate}</Text></View>
+          </View>
         ) : null}
         <Text style={s.muted}>⭐ {rating} · {trips} trips · Verified</Text>
       </View>
@@ -1257,17 +1947,54 @@ function ConfirmedScreen({ navigate }: NavProp) {
     if (currentScreen !== 'Chat') showBanner(`Driver: ${body.slice(0, 60)}`, 'info');
   }, [showBanner, currentScreen]);
 
+  const { profile: myProfile } = useMyProfile();
   const { ride, status } = useRideStatus(rideId, handleStatusChange);
   const driverCoords = useDriverLocation(ride?.driver_id ?? null);
   const unreadCount = useUnreadChatCount(rideId, handleChatMessage);
-  const { driverName, displayString: vehicleDisplay, seats: vehicleSeats } = useDriverVehicle(ride?.driver_id);
-  const [seconds, setSeconds] = useState(272);
+  const { driverName, displayString: vehicleDisplay, plate: driverPlate, vehicle: driverVehicle } = useDriverVehicle(ride?.driver_id);
+  const { profile: driverUserProfile } = useUserProfile(ride?.driver_id ?? null);
+
+  const pickupCoords = ride?.pickup_lat && ride?.pickup_lng
+    ? { lat: ride.pickup_lat, lng: ride.pickup_lng }
+    : null;
+
+  const { etaMin, distanceM } = useDriverEta(
+    status === 'driver_assigned' ? driverCoords : null,
+    pickupCoords,
+  );
+
+  const arrivedNotifiedRef = useRef(false);
+  const selfCancelledRef = useRef(false);
 
   useEffect(() => {
     haptic.notify(Haptics.NotificationFeedbackType.Success);
-    const t = setInterval(() => setSeconds((x) => Math.max(0, x - 1)), 1000);
-    return () => clearInterval(t);
   }, []);
+
+  // Driver cancelled while passenger is waiting
+  useEffect(() => {
+    if (status !== 'cancelled') return;
+    if (selfCancelledRef.current) return;
+    haptic.notify(Haptics.NotificationFeedbackType.Warning);
+    if (Platform.OS === 'web') {
+      (globalThis as any).alert('Your driver cancelled this ride.');
+      setRideId(null);
+      navigate('Home');
+    } else {
+      Alert.alert('Ride Cancelled', 'Your driver cancelled this ride.', [
+        { text: 'OK', onPress: () => { setRideId(null); navigate('Home'); } },
+      ]);
+    }
+  }, [status]);
+
+  // Proximity alert: push notification + banner when driver is within 500 m
+  useEffect(() => {
+    if (arrivedNotifiedRef.current) return;
+    if (status !== 'driver_assigned') return;
+    if (distanceM === null || distanceM > 500) return;
+    arrivedNotifiedRef.current = true;
+    showBanner('Your driver is arriving now!', 'success');
+    scheduleLocalNotification('Your driver is arriving now', 'Your driver is less than 500 m away. Head to your pickup spot.').catch(() => {});
+  }, [distanceM, status]);
 
   // When the driver completes the trip, send passenger to rating screen
   useEffect(() => {
@@ -1281,7 +2008,17 @@ function ConfirmedScreen({ navigate }: NavProp) {
 
   const handleCancelRide = () => {
     const doCancel = async () => {
-      try { if (rideId) await cancelRide(rideId); } catch (e) { console.warn('cancel failed', e); }
+      selfCancelledRef.current = true;
+      if (!rideId) { navigate('Home'); return; }
+      try {
+        const result = await cancelAndRefundRide(rideId);
+        if (result.refunded) {
+          Alert.alert('Ride cancelled', 'Your card payment has been refunded. It may take 5–10 business days to appear.');
+        }
+      } catch (e) {
+        try { await cancelRide(rideId); } catch {}
+        console.warn('[ConfirmedScreen] cancel/refund failed', e);
+      }
       setRideId(null);
       navigate('Home');
     };
@@ -1295,9 +2032,50 @@ function ConfirmedScreen({ navigate }: NavProp) {
     }
   };
 
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  const timerLabel = seconds > 0 ? `${mins}:${secs.toString().padStart(2, '0')}` : 'Arriving now! 🎉';
+  const timerLabel =
+    distanceM !== null && distanceM <= 500 ? 'Arriving now! 🎉' :
+    etaMin !== null ? `${etaMin} min` :
+    ride?.eta_min != null ? `~${ride.eta_min} min` :
+    'Calculating…';
+
+  const handleSOS = () => {
+    const emergencyName = (myProfile as any)?.emergency_contact_name as string | null;
+    const emergencyPhone = (myProfile as any)?.emergency_contact_phone as string | null;
+    const locationMsg = ride
+      ? `URGENT: I am in an ATEE ride. Pickup: ${ride.pickup_address}. Driver: ${driverName ?? 'unknown'}. Vehicle: ${vehicleDisplay ?? 'unknown'}. Plate: ${driverPlate ?? 'unknown'}.`
+      : 'URGENT: I need help. I am in an ATEE ride.';
+    Alert.alert('SOS Emergency', 'Choose an action:', [
+      {
+        text: 'Call 911',
+        style: 'destructive',
+        onPress: () => Linking.openURL('tel:911'),
+      },
+      ...(emergencyPhone ? [{
+        text: `Alert ${emergencyName ?? 'Emergency Contact'}`,
+        onPress: () => Linking.openURL(
+          `sms:${emergencyPhone}?body=${encodeURIComponent(locationMsg)}`
+        ),
+      }] : []),
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  };
+
+  const handleShare = () => {
+    if (!ride) return;
+    const vehicleInfo = driverVehicle
+      ? `${driverVehicle.vehicle_color ?? ''} ${driverVehicle.vehicle_make ?? ''} ${driverVehicle.vehicle_model ?? ''}`.trim()
+      : 'Unknown vehicle';
+    const msg = [
+      `I'm in an ATEE ride — tracking details:`,
+      `Driver: ${driverName ?? 'En route'}`,
+      `Vehicle: ${vehicleInfo}`,
+      driverPlate ? `Plate: ${driverPlate}` : null,
+      `From: ${ride.pickup_address}`,
+      `To: ${ride.destination_address}`,
+      etaMin ? `ETA to pickup: ${etaMin} min` : null,
+    ].filter(Boolean).join('\n');
+    Share.share({ message: msg, title: 'My ATEE Ride' }).catch(() => {});
+  };
 
   const rows: [string, string][] = [
     ['Pickup', ride?.pickup_address ?? '124 Baker Street'],
@@ -1312,14 +2090,24 @@ function ConfirmedScreen({ navigate }: NavProp) {
           title="ATEE"
           rightElement={
             (status === 'driver_assigned' || status === 'in_progress') ? (
-              <TouchableOpacity style={s.chatIconWrap} onPress={() => navigate('Chat')}>
-                <Ionicons name="chatbubble-ellipses" size={24} color="white" />
-                {unreadCount > 0 && (
-                  <View style={s.chatBadge}>
-                    <Text style={s.chatBadgeText}>{unreadCount > 9 ? '9+' : String(unreadCount)}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}>
+                {driverUserProfile?.phone ? (
+                  <TouchableOpacity onPress={() => Linking.openURL(`tel:${driverUserProfile.phone}`)}>
+                    <Ionicons name="call" size={22} color="white" />
+                  </TouchableOpacity>
+                ) : null}
+                <TouchableOpacity onPress={handleShare}>
+                  <Ionicons name="share-outline" size={22} color="white" />
+                </TouchableOpacity>
+                <TouchableOpacity style={s.chatIconWrap} onPress={() => navigate('Chat')}>
+                  <Ionicons name="chatbubble-ellipses" size={24} color="white" />
+                  {unreadCount > 0 && (
+                    <View style={s.chatBadge}>
+                      <Text style={s.chatBadgeText}>{unreadCount > 9 ? '9+' : String(unreadCount)}</Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              </View>
             ) : undefined
           }
         />
@@ -1337,7 +2125,9 @@ function ConfirmedScreen({ navigate }: NavProp) {
           </Text>
           {status !== 'completed' && (
             <View style={{ marginTop: 14, alignItems: 'center' }}>
-              <Text style={{ fontSize: 12, color: 'rgba(255,255,255,0.7)' }}>Arriving in</Text>
+              <Text style={{ fontSize: 12, color: 'rgba(255,255,255,0.7)' }}>
+                {status === 'driver_assigned' ? 'Driver arrives in' : 'Trip in progress'}
+              </Text>
               <Text style={s.countdownTimer}>{timerLabel}</Text>
             </View>
           )}
@@ -1371,14 +2161,16 @@ function ConfirmedScreen({ navigate }: NavProp) {
                 />
                 <View style={{ flex: 1 }}>
                   <Text style={s.driverName}>{driverName ?? 'Your Driver'}</Text>
-                  {vehicleDisplay ? (
-                    <Text style={s.muted}>{vehicleDisplay}</Text>
+                  {driverVehicle?.vehicle_make ? (
+                    <Text style={s.muted}>
+                      {[driverVehicle.vehicle_color, driverVehicle.vehicle_make, driverVehicle.vehicle_model].filter(Boolean).join(' ')}
+                    </Text>
                   ) : null}
-                  {vehicleSeats ? (
-                    <Text style={s.muted}>{vehicleSeats} seats available</Text>
-                  ) : (
-                    <Text style={s.muted}>On the way to you</Text>
-                  )}
+                  {driverPlate ? (
+                    <View style={{ flexDirection: 'row', marginTop: 3 }}>
+                      <View style={s.plateBadge}><Text style={s.plateBadgeText}>{driverPlate}</Text></View>
+                    </View>
+                  ) : null}
                 </View>
               </View>
             </View>
@@ -1391,6 +2183,11 @@ function ConfirmedScreen({ navigate }: NavProp) {
               </View>
             ))}
           </View>
+          {(status === 'driver_assigned' || status === 'in_progress') && (
+            <TouchableOpacity style={s.sosBtn} onPress={handleSOS}>
+              <Text style={s.sosBtnText}>SOS Emergency</Text>
+            </TouchableOpacity>
+          )}
           {status !== 'in_progress' && status !== 'completed' && (
             <TouchableOpacity style={s.outlineBtn} onPress={handleCancelRide}>
               <Text style={[s.outlineBtnText, { color: RED }]}>Cancel Ride</Text>
@@ -1411,9 +2208,9 @@ function ConfirmedScreen({ navigate }: NavProp) {
 const NEARBY_RADIUS_MI = 25;
 
 function DriverHomeScreen({ navigate }: NavProp) {
-  const { setSelectedRide } = useContext(RideContext);
+  const { setSelectedRide, driverIsOnline: online, setDriverIsOnline: setOnline } = useContext(RideContext);
   const { showBanner } = useBanner();
-  const [online, setOnline] = useState(false);
+  const [availableSeats, setAvailableSeats] = useState(4);
 
   const shortAddr = (addr: string) => addr.split(',')[0];
 
@@ -1428,6 +2225,11 @@ function DriverHomeScreen({ navigate }: NavProp) {
   const { stats: todayStats } = useDriverTodayStats();
   const { isComplete: vehicleComplete } = useMyVehicle();
   const [driverCoords, setDriverCoords] = useState<LatLng | null>(null);
+  const [preferredArea, setPreferredArea] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchDriverPreferredArea().then(setPreferredArea).catch(() => {});
+  }, []);
 
   // Get driver's location once on mount for proximity filtering
   useEffect(() => {
@@ -1439,7 +2241,7 @@ function DriverHomeScreen({ navigate }: NavProp) {
   // Filter rides to within 25 miles of driver's current location
   const rides = driverCoords
     ? allRides.filter((r) => {
-        if (!r.pickup_lat || !r.pickup_lng) return true; // no coords = include
+        if (!r.pickup_lat || !r.pickup_lng) return true;
         return haversineDistanceMi(driverCoords, { lat: r.pickup_lat, lng: r.pickup_lng }) <= NEARBY_RADIUS_MI;
       })
     : allRides;
@@ -1455,8 +2257,16 @@ function DriverHomeScreen({ navigate }: NavProp) {
     setOnline(true);
   };
 
-  // Sync online state to Supabase and stream GPS when online
+  // Sync online state to Supabase and GPS stream.
+  // The guard prevents writing `is_online: false` on initial mount — only the
+  // driver's explicit tap should ever set them offline.
+  const didExplicitlyToggleRef = useRef(false);
   useEffect(() => {
+    // Skip the very first render when online=false (screen mount / app start).
+    // Only proceed once the driver has explicitly toggled at least once this mount.
+    if (!didExplicitlyToggleRef.current && !online) return;
+    didExplicitlyToggleRef.current = true;
+
     setDriverOnline(online).catch((e: any) => {
       const msg: string = e?.message ?? '';
       if (msg.includes('VEHICLE_PROFILE_REQUIRED')) {
@@ -1469,6 +2279,7 @@ function DriverHomeScreen({ navigate }: NavProp) {
         console.warn('setDriverOnline failed', e);
       }
     });
+
     if (online) {
       startLocationStream();
     } else {
@@ -1476,8 +2287,10 @@ function DriverHomeScreen({ navigate }: NavProp) {
     }
   }, [online]);
 
-  // Stop streaming on unmount
+  // Restart location stream if driver is already online when this screen mounts
+  // (e.g. navigating back from Earnings/Profile while online)
   useEffect(() => {
+    if (online) startLocationStream();
     return () => { stopLocationStream(); };
   }, []);
 
@@ -1509,6 +2322,33 @@ function DriverHomeScreen({ navigate }: NavProp) {
           <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 6 }}>
             {online ? '🟢 Searching for nearby riders...' : '🔴 You are offline'}
           </Text>
+          {preferredArea && (
+            <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 11, marginTop: 2 }}>
+              📍 Area: {preferredArea}
+            </Text>
+          )}
+          {online && (
+            <View style={{ marginTop: 10 }}>
+              <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginBottom: 6 }}>
+                Seats available in your car:
+              </Text>
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                {([1, 2, 3, 4] as const).map((n) => (
+                  <TouchableOpacity
+                    key={n}
+                    style={{ flex: 1, paddingVertical: 6, borderRadius: 8, backgroundColor: availableSeats === n ? 'white' : 'rgba(255,255,255,0.2)', alignItems: 'center' }}
+                    onPress={() => {
+                      haptic.select();
+                      setAvailableSeats(n);
+                      updateDriverAvailableSeats(n).catch(() => {});
+                    }}
+                  >
+                    <Text style={{ color: availableSeats === n ? RED : 'white', fontWeight: '600', fontSize: 13 }}>{n}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
         </View>
         <ScrollView contentContainerStyle={{ padding: 16 }}>
           {!vehicleComplete && (
@@ -1535,6 +2375,7 @@ function DriverHomeScreen({ navigate }: NavProp) {
               </View>
             ))}
           </View>
+          <ReferralBanner />
           <View style={s.rowBetween}>
             <Text style={s.sectionTitle}>Nearby Requests</Text>
             {rides.length > 0 && (
@@ -1568,6 +2409,8 @@ function DriverHomeScreen({ navigate }: NavProp) {
                     <Text style={[s.muted, { marginTop: 2 }]}>
                       {ride.distance_mi ?? '—'} mi · {ride.eta_min ?? '—'} min
                       {ride.scheduled_for ? ` · 🗓 Scheduled` : ''}
+                      {(ride.seats ?? 1) > 1 ? ` · 👥 ${ride.seats} seats` : ''}
+                      {ride.is_shared ? ` · 🤝 Shared` : ''}
                     </Text>
                   </View>
                   <View style={{ alignItems: 'flex-end' }}>
@@ -1592,8 +2435,13 @@ function DriverHomeScreen({ navigate }: NavProp) {
 function DriverRequestScreen({ navigate }: NavProp) {
   const { selectedRide, setChosenBid } = useContext(RideContext);
   const [accepting, setAccepting] = useState(false);
+  const [showCounter, setShowCounter] = useState(false);
+  const [counterText, setCounterText] = useState('');
+  const [sendingCounter, setSendingCounter] = useState(false);
   const { profile: passengerProfile } = useUserProfile(selectedRide?.passenger_id);
-  const { status: rideStatus } = useRideStatus(selectedRide?.id ?? null);
+  const { profile: myProfile } = useMyProfile();
+  const { status: rideStatus, ride: liveRide } = useRideStatus(selectedRide?.id ?? null);
+  const myNegotiations = useDriverNegotiations(selectedRide?.id ?? null, myProfile?.id ?? null);
 
   // If passenger cancels while driver is viewing the request
   useEffect(() => {
@@ -1609,6 +2457,38 @@ function DriverRequestScreen({ navigate }: NavProp) {
       }
     }
   }, [rideStatus]);
+
+  // If passenger accepted our negotiation, the ride is now driver_assigned to us
+  useEffect(() => {
+    if (rideStatus === 'driver_assigned' && liveRide?.driver_id === myProfile?.id) {
+      haptic.notify(Haptics.NotificationFeedbackType.Success);
+      navigate('DriverActive');
+    }
+  }, [rideStatus, liveRide?.driver_id, myProfile?.id]);
+
+  const handleSendCounter = async () => {
+    const val = parseFloat(counterText);
+    if (!val || val <= 0) { Alert.alert('Enter a valid price'); return; }
+    if (!selectedRide || sendingCounter) return;
+    const nextRound = myNegotiations.length > 0
+      ? myNegotiations[myNegotiations.length - 1].round + 1
+      : 1;
+    try {
+      setSendingCounter(true);
+      haptic.select();
+      await sendDriverCounter(selectedRide.id, selectedRide.passenger_id, val, nextRound);
+      setShowCounter(false);
+      setCounterText('');
+    } catch (e: any) {
+      Alert.alert('Error', e?.message ?? 'Could not send counter offer');
+    } finally {
+      setSendingCounter(false);
+    }
+  };
+
+  const handleCancelMyOffer = async (negId: string) => {
+    try { await cancelNegotiation(negId); } catch {}
+  };
   const pan = useRef(new Animated.ValueXY()).current;
 
   const handleAccept = async () => {
@@ -1698,10 +2578,14 @@ function DriverRequestScreen({ navigate }: NavProp) {
     { label: 'To', value: selectedRide.destination_address },
     { label: 'Distance', value: `${selectedRide.distance_mi ?? '—'} miles` },
     {
+      label: 'Seats needed',
+      value: `${selectedRide.seats ?? 1} passenger${(selectedRide.seats ?? 1) > 1 ? 's' : ''}`,
+    },
+    {
       label: 'Payment',
       value: selectedRide.payment_method === 'etransfer' ? '📱 E-transfer' : '💵 Cash',
     },
-    { label: 'Passenger offer', value: `$${price}`, color: RED },
+    { label: 'Passenger offer', value: `$${price} total`, color: RED },
     { label: 'You keep', value: `$${price} (100%)`, color: GREEN },
   ];
 
@@ -1709,10 +2593,14 @@ function DriverRequestScreen({ navigate }: NavProp) {
     <ScreenTransition>
       <SafeAreaView style={s.screen}>
         <TopBar title="ATEE" onBack={() => navigate('Onboarding')} />
-        <View style={{ padding: 16, flex: 1 }}>
+        <ScrollView
+          contentContainerStyle={{ padding: 16, flexGrow: 1 }}
+          keyboardShouldPersistTaps="handled"
+          scrollEnabled={myNegotiations.length > 0}
+        >
           <Text style={[s.bigTitle, { marginBottom: 4 }]}>Trip Request</Text>
           <Text style={s.muted}>Swipe right to accept · Swipe left to decline</Text>
-          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <View style={{ minHeight: 320, justifyContent: 'center', alignItems: 'center' }}>
             <Animated.View style={[s.swipeHint, s.swipeHintLeft, { opacity: declineOpacity }]}>
               <Text style={s.swipeHintTextRed}>✗ Decline</Text>
             </Animated.View>
@@ -1758,6 +2646,15 @@ function DriverRequestScreen({ navigate }: NavProp) {
                   </Text>
                 </View>
               ))}
+              {selectedRide.is_shared && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#e0f2fe', borderRadius: 8, padding: 10, marginTop: 8 }}>
+                  <Ionicons name="people" size={16} color="#0369a1" />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 12, color: '#0369a1', fontWeight: '600' }}>Shared ride</Text>
+                    <Text style={{ fontSize: 11, color: '#0369a1', marginTop: 1 }}>Passenger is open to sharing with other riders going the same way.</Text>
+                  </View>
+                </View>
+              )}
               {selectedRide.passenger_note ? (
                 <View style={{ backgroundColor: '#FEF3C7', borderRadius: 8, padding: 10, marginTop: 8 }}>
                   <Text style={{ fontSize: 12, color: '#92400E', fontWeight: '600', marginBottom: 2 }}>📝 Passenger note</Text>
@@ -1766,9 +2663,87 @@ function DriverRequestScreen({ navigate }: NavProp) {
               ) : null}
             </Animated.View>
           </View>
-          <View style={{ flexDirection: 'row', gap: 12, marginBottom: 16 }}>
+          {/* Negotiation thread — shows after driver sends a counter */}
+          {myNegotiations.length > 0 && (
+            <View style={{ marginTop: 12 }}>
+              <Text style={[s.muted, { marginBottom: 6, fontWeight: '600' }]}>Negotiation thread</Text>
+              {myNegotiations.map((n) => {
+                const isDriver = n.created_by === 'driver';
+                return (
+                  <View
+                    key={n.id}
+                    style={{
+                      flexDirection: 'row',
+                      justifyContent: isDriver ? 'flex-end' : 'flex-start',
+                      marginBottom: 6,
+                    }}
+                  >
+                    <View
+                      style={{
+                        backgroundColor: isDriver ? '#fee2e2' : '#f3f4f6',
+                        borderRadius: 10,
+                        paddingHorizontal: 12,
+                        paddingVertical: 7,
+                        maxWidth: '70%',
+                      }}
+                    >
+                      <Text style={{ fontSize: 14, fontWeight: '700', color: isDriver ? RED : '#111' }}>
+                        ${n.offered_price.toFixed(2)}
+                      </Text>
+                      <Text style={{ fontSize: 10, color: '#888', marginTop: 1 }}>
+                        {isDriver ? 'You' : 'Passenger'} · Round {n.round}
+                        {n.status !== 'pending' ? ` · ${n.status}` : ''}
+                      </Text>
+                    </View>
+                    {isDriver && n.status === 'pending' && (
+                      <TouchableOpacity
+                        onPress={() => handleCancelMyOffer(n.id)}
+                        style={{ justifyContent: 'center', paddingLeft: 8 }}
+                      >
+                        <Ionicons name="close-circle" size={18} color="#ccc" />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          )}
+
+          {/* Counter price input */}
+          {showCounter && (
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+              <TextInput
+                style={{ flex: 1, borderWidth: 1, borderColor: '#e0e0e0', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, fontSize: 15, backgroundColor: 'white' }}
+                placeholder="Counter price ($)"
+                keyboardType="decimal-pad"
+                value={counterText}
+                onChangeText={setCounterText}
+                returnKeyType="send"
+                onSubmitEditing={handleSendCounter}
+                autoFocus
+              />
+              <TouchableOpacity
+                style={{ paddingHorizontal: 18, borderRadius: 10, backgroundColor: RED, alignItems: 'center', justifyContent: 'center' }}
+                onPress={handleSendCounter}
+                disabled={sendingCounter}
+              >
+                {sendingCounter
+                  ? <ActivityIndicator size="small" color="white" />
+                  : <Text style={{ color: 'white', fontWeight: '700' }}>Send</Text>}
+              </TouchableOpacity>
+            </View>
+          )}
+
+          <View style={{ flexDirection: 'row', gap: 8, marginBottom: 16, marginTop: showCounter ? 8 : 0 }}>
             <TouchableOpacity style={[s.outlineBtn, { flex: 1 }]} onPress={handleDecline} disabled={accepting}>
               <Text style={s.outlineBtnText}>✗ Decline</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={{ flex: 1, paddingVertical: 12, borderRadius: 10, borderWidth: 1, borderColor: RED, alignItems: 'center', backgroundColor: showCounter ? '#fee2e2' : 'white' }}
+              onPress={() => { haptic.select(); setShowCounter((v) => !v); }}
+              disabled={accepting}
+            >
+              <Text style={{ color: RED, fontWeight: '700', fontSize: 14 }}>↕ Counter</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[s.redBtn, { flex: 1, margin: 0, opacity: accepting ? 0.6 : 1 }]}
@@ -1780,7 +2755,7 @@ function DriverRequestScreen({ navigate }: NavProp) {
                 : <Text style={s.redBtnText}>✓ Accept</Text>}
             </TouchableOpacity>
           </View>
-        </View>
+        </ScrollView>
       </SafeAreaView>
     </ScreenTransition>
   );
@@ -1891,14 +2866,21 @@ function DriverActiveScreen({ navigate }: NavProp) {
           title="Active Trip"
           onBack={handleBackToOnboarding}
           rightElement={
-            <TouchableOpacity style={s.chatIconWrap} onPress={() => navigate('Chat')}>
-              <Ionicons name="chatbubble-ellipses" size={24} color="white" />
-              {unreadCount > 0 && (
-                <View style={s.chatBadge}>
-                  <Text style={s.chatBadgeText}>{unreadCount > 9 ? '9+' : String(unreadCount)}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}>
+              {passengerProfile?.phone ? (
+                <TouchableOpacity onPress={() => Linking.openURL(`tel:${passengerProfile.phone}`)}>
+                  <Ionicons name="call" size={22} color="white" />
+                </TouchableOpacity>
+              ) : null}
+              <TouchableOpacity style={s.chatIconWrap} onPress={() => navigate('Chat')}>
+                <Ionicons name="chatbubble-ellipses" size={24} color="white" />
+                {unreadCount > 0 && (
+                  <View style={s.chatBadge}>
+                    <Text style={s.chatBadgeText}>{unreadCount > 9 ? '9+' : String(unreadCount)}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            </View>
           }
         />
         <View style={{ paddingHorizontal: 16, paddingTop: 12 }}>
@@ -1917,6 +2899,34 @@ function DriverActiveScreen({ navigate }: NavProp) {
             eta={selectedRide.eta_min != null ? `${selectedRide.eta_min} min` : '—'}
             distance={selectedRide.distance_mi != null ? `${selectedRide.distance_mi} mi` : '—'}
           />
+          <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+            <TouchableOpacity
+              style={[s.redBtn, { flex: 1, flexDirection: 'row', justifyContent: 'center', gap: 6, backgroundColor: '#c2410c' }]}
+              onPress={() => {
+                const lat = selectedRide.pickup_lat;
+                const lng = selectedRide.pickup_lng;
+                if (!lat || !lng) return;
+                const url = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&travelmode=driving`;
+                Linking.openURL(url);
+              }}
+            >
+              <Ionicons name="person" size={14} color="white" />
+              <Text style={s.redBtnText}>Pickup</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.redBtn, { flex: 1, flexDirection: 'row', justifyContent: 'center', gap: 6 }]}
+              onPress={() => {
+                const lat = selectedRide.destination_lat;
+                const lng = selectedRide.destination_lng;
+                if (!lat || !lng) return;
+                const url = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&travelmode=driving`;
+                Linking.openURL(url);
+              }}
+            >
+              <Ionicons name="navigate" size={14} color="white" />
+              <Text style={s.redBtnText}>Destination</Text>
+            </TouchableOpacity>
+          </View>
         </View>
         <ScrollView contentContainerStyle={{ padding: 16 }}>
           <View style={s.card}>
@@ -2401,11 +3411,13 @@ function RateTripScreen({ navigate }: NavProp) {
 // ─── TRIPS HISTORY ────────────────────────────────────────────
 function TripsScreen({ navigate }: NavProp) {
   const { profile } = useMyProfile();
+  const { setRebookRide } = useContext(RideContext);
   const isDriver = profile?.role === 'driver' || profile?.role === 'both';
   const [activeTab, setActiveTab] = useState<'passenger' | 'driver'>('passenger');
   const [passengerRides, setPassengerRides] = useState<RideType[]>([]);
   const [driverRides, setDriverRides] = useState<RideType[]>([]);
   const [loading, setLoading] = useState(true);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -2488,60 +3500,102 @@ function TripsScreen({ navigate }: NavProp) {
               <Text style={[s.muted, { marginTop: 12, fontSize: 14 }]}>No trips yet.</Text>
             </View>
           ) : (
-            rides.map((ride) => (
-              <View key={ride.id} style={s.tripHistoryCard}>
-                <View style={[s.rowBetween, { marginBottom: 8 }]}>
-                  <Text style={[s.muted, { fontSize: 11 }]}>{fmtDate(ride.completed_at ?? ride.created_at)}</Text>
-                  <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
-                    {ride.payment_method && (
-                      <View style={s.greenBadge}>
-                        <Text style={s.greenBadgeText}>
-                          {ride.payment_method === 'etransfer' ? '📱 E-transfer' : '💵 Cash'}
+            rides.map((ride) => {
+              const isExpanded = expandedId === ride.id;
+              return (
+                <TouchableOpacity
+                  key={ride.id}
+                  style={s.tripHistoryCard}
+                  onPress={() => { haptic.select(); setExpandedId(isExpanded ? null : ride.id); }}
+                  activeOpacity={0.85}
+                >
+                  <View style={[s.rowBetween, { marginBottom: 8 }]}>
+                    <Text style={[s.muted, { fontSize: 11 }]}>{fmtDate(ride.completed_at ?? ride.created_at)}</Text>
+                    <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
+                      {ride.payment_method && (
+                        <View style={s.greenBadge}>
+                          <Text style={s.greenBadgeText}>
+                            {ride.payment_method === 'etransfer' ? '📱 E-transfer' : '💵 Cash'}
+                          </Text>
+                        </View>
+                      )}
+                      <View style={[s.greenBadge, { backgroundColor: statusColor(ride.status) + '22' }]}>
+                        <Text style={[s.greenBadgeText, { color: statusColor(ride.status) }]}>
+                          {statusLabel(ride.status)}
                         </Text>
                       </View>
-                    )}
-                    <View style={[s.greenBadge, { backgroundColor: statusColor(ride.status) + '22' }]}>
-                      <Text style={[s.greenBadgeText, { color: statusColor(ride.status) }]}>
-                        {statusLabel(ride.status)}
-                      </Text>
+                      <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={14} color="#aaa" />
                     </View>
                   </View>
-                </View>
 
-                <View style={{ flexDirection: 'row', gap: 10 }}>
-                  <View style={s.routeTrack}>
-                    <View style={[s.routeDot, { backgroundColor: GREEN }]} />
-                    <View style={s.routeLine} />
-                    <View style={[s.routeDot, { backgroundColor: RED }]} />
+                  <View style={{ flexDirection: 'row', gap: 10 }}>
+                    <View style={s.routeTrack}>
+                      <View style={[s.routeDot, { backgroundColor: GREEN }]} />
+                      <View style={s.routeLine} />
+                      <View style={[s.routeDot, { backgroundColor: RED }]} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.tripHistoryAddr} numberOfLines={1}>{ride.pickup_address}</Text>
+                      <View style={{ height: 10 }} />
+                      <Text style={[s.tripHistoryAddr, { color: RED }]} numberOfLines={1}>{ride.destination_address}</Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end', justifyContent: 'center' }}>
+                      <Text style={[s.tripPrice, { color: ride.status === 'completed' ? RED : '#aaa' }]}>
+                        ${ride.offered_price.toFixed(2)}
+                      </Text>
+                      {ride.distance_mi != null && (
+                        <Text style={s.muted}>{ride.distance_mi} mi</Text>
+                      )}
+                    </View>
                   </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.tripHistoryAddr} numberOfLines={1}>{ride.pickup_address}</Text>
-                    <View style={{ height: 10 }} />
-                    <Text style={[s.tripHistoryAddr, { color: RED }]} numberOfLines={1}>{ride.destination_address}</Text>
-                  </View>
-                  <View style={{ alignItems: 'flex-end', justifyContent: 'center' }}>
-                    <Text style={[s.tripPrice, { color: ride.status === 'completed' ? RED : '#aaa' }]}>
-                      ${ride.offered_price.toFixed(2)}
-                    </Text>
-                    {ride.distance_mi != null && (
-                      <Text style={s.muted}>{ride.distance_mi} mi</Text>
-                    )}
-                  </View>
-                </View>
 
-                {ride.scheduled_for && (
-                  <View style={[s.rowBetween, { marginTop: 8, backgroundColor: '#FEF3C7', borderRadius: 6, padding: 6 }]}>
-                    <Text style={[s.muted, { color: '#92400E', fontSize: 11 }]}>🗓 Scheduled</Text>
-                    <Text style={[s.muted, { color: '#92400E', fontSize: 11 }]}>
-                      {new Date(ride.scheduled_for).toLocaleString([], {
-                        month: 'short', day: 'numeric',
-                        hour: '2-digit', minute: '2-digit',
-                      })}
-                    </Text>
-                  </View>
-                )}
-              </View>
-            ))
+                  {ride.scheduled_for && (
+                    <View style={[s.rowBetween, { marginTop: 8, backgroundColor: '#FEF3C7', borderRadius: 6, padding: 6 }]}>
+                      <Text style={[s.muted, { color: '#92400E', fontSize: 11 }]}>🗓 Scheduled</Text>
+                      <Text style={[s.muted, { color: '#92400E', fontSize: 11 }]}>
+                        {new Date(ride.scheduled_for).toLocaleString([], {
+                          month: 'short', day: 'numeric',
+                          hour: '2-digit', minute: '2-digit',
+                        })}
+                      </Text>
+                    </View>
+                  )}
+
+                  {isExpanded && (
+                    <View style={s.receiptCard}>
+                      {ride.distance_mi != null && (
+                        <View style={s.receiptRow}>
+                          <Text style={s.receiptLabel}>Distance</Text>
+                          <Text style={s.receiptValue}>{ride.distance_mi} mi</Text>
+                        </View>
+                      )}
+                      {ride.payment_method && (
+                        <View style={s.receiptRow}>
+                          <Text style={s.receiptLabel}>Payment</Text>
+                          <Text style={s.receiptValue}>{ride.payment_method === 'etransfer' ? 'E-transfer' : 'Cash'}</Text>
+                        </View>
+                      )}
+                      <View style={s.receiptRow}>
+                        <Text style={s.receiptLabel}>Fare</Text>
+                        <Text style={s.receiptValue}>${ride.offered_price.toFixed(2)}</Text>
+                      </View>
+                      <View style={[s.receiptRow, { borderBottomWidth: 0 }]}>
+                        <Text style={s.receiptLabel}>Ref #</Text>
+                        <Text style={s.receiptValue}>{ride.id.slice(0, 8).toUpperCase()}</Text>
+                      </View>
+                      {ride.status === 'completed' && activeTab === 'passenger' && (
+                        <TouchableOpacity
+                          style={[s.redBtn, { marginTop: 10, paddingVertical: 10 }]}
+                          onPress={() => { haptic.select(); setRebookRide(ride); navigate('Book'); }}
+                        >
+                          <Text style={s.redBtnText}>Rebook this trip</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  )}
+                </TouchableOpacity>
+              );
+            })
           )}
         </ScrollView>
         <BottomNav active="Trips" navigate={navigate} mode={navMode} />
@@ -2562,6 +3616,13 @@ function DriverEarningsScreen({ navigate }: NavProp) {
     loading,
   } = useDriverWallet();
 
+  const [period, setPeriod] = useState<'today' | 'week' | 'all'>('all');
+  const [acceptanceRate, setAcceptanceRate] = useState<number | null>(null);
+
+  useEffect(() => {
+    fetchDriverCancelRate().then(({ acceptanceRate: r }) => setAcceptanceRate(r)).catch(() => {});
+  }, []);
+
   const fmt = (cents: number) =>
     `$${(cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -2575,6 +3636,21 @@ function DriverEarningsScreen({ navigate }: NavProp) {
     if (d.toDateString() === yesterday.toDateString()) return `Yesterday · ${time}`;
     return `${d.toLocaleDateString()} · ${time}`;
   };
+
+  const filteredEarnings = earnings.filter((e) => {
+    if (period === 'all') return true;
+    const d = new Date(e.completed_at);
+    const now = new Date();
+    if (period === 'today') {
+      return d.toDateString() === now.toDateString();
+    }
+    // week: past 7 days
+    const weekAgo = new Date(now);
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    return d >= weekAgo;
+  });
+
+  const periodTotal = filteredEarnings.reduce((sum, e) => sum + e.amount_cents, 0);
 
   return (
     <ScreenTransition>
@@ -2606,13 +3682,48 @@ function DriverEarningsScreen({ navigate }: NavProp) {
             </View>
           </View>
 
-          <Text style={[s.sectionTitle, { marginTop: 4 }]}>Recent Trips</Text>
+          {acceptanceRate !== null && (
+            <View style={[s.statBox, { marginTop: 8, width: '100%' }]}>
+              <Text style={s.statLabel}>Acceptance Rate</Text>
+              <Text style={[s.statValue, { color: acceptanceRate >= 80 ? GREEN : AMBER }]}>
+                {acceptanceRate}%
+              </Text>
+              <Text style={[s.muted, { fontSize: 11 }]}>
+                {acceptanceRate >= 80 ? 'Good standing' : 'Below recommended 80%'}
+              </Text>
+            </View>
+          )}
+
+          <View style={[s.tabRow, { marginTop: 16, marginBottom: 4 }]}>
+            {(['today', 'week', 'all'] as const).map((p) => (
+              <TouchableOpacity
+                key={p}
+                style={period === p ? s.periodTabActive : s.periodTab}
+                onPress={() => { haptic.select(); setPeriod(p); }}
+              >
+                <Text style={period === p ? s.periodTabTextActive : s.periodTabText}>
+                  {p === 'today' ? 'Today' : p === 'week' ? 'This Week' : 'All Time'}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {period !== 'all' && (
+            <View style={[s.rowBetween, { paddingVertical: 8 }]}>
+              <Text style={s.muted}>{period === 'today' ? "Today's" : "This week's"} earnings</Text>
+              <Text style={[s.tripPrice, { color: RED }]}>{fmt(periodTotal)}</Text>
+            </View>
+          )}
+
+          <Text style={[s.sectionTitle, { marginTop: 4 }]}>
+            {period === 'today' ? "Today's" : period === 'week' ? "This Week's" : 'Recent'} Trips
+          </Text>
           {loading ? (
             <><SkeletonCard /><SkeletonCard /></>
-          ) : earnings.length === 0 ? (
-            <Text style={s.muted}>No trips recorded yet.</Text>
+          ) : filteredEarnings.length === 0 ? (
+            <Text style={s.muted}>No trips in this period.</Text>
           ) : (
-            earnings.map((e) => (
+            filteredEarnings.map((e) => (
               <View key={e.id} style={s.tripRow}>
                 <View style={{ width: 28, alignItems: 'center' }}>
                   <Text>{e.payment_method === 'etransfer' ? '📱' : '💵'}</Text>
@@ -2648,6 +3759,13 @@ function ProfileScreen({ navigate }: NavProp) {
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState('');
   const [savingName, setSavingName] = useState(false);
+  // Emergency contact
+  const [emergencyName, setEmergencyName] = useState('');
+  const [emergencyPhone, setEmergencyPhone] = useState('');
+  const [savingEmergency, setSavingEmergency] = useState(false);
+  // Driver corridor
+  const [corridor, setCorridor] = useState('');
+  const [savingCorridor, setSavingCorridor] = useState(false);
 
   const kycApprovedCount = kycDocs.filter(
     (d) =>
@@ -2661,6 +3779,17 @@ function ProfileScreen({ navigate }: NavProp) {
       if (user?.email) setEmail(user.email);
     });
   }, []);
+
+  useEffect(() => {
+    if (!profile) return;
+    setEmergencyName((profile as any).emergency_contact_name ?? '');
+    setEmergencyPhone((profile as any).emergency_contact_phone ?? '');
+  }, [profile?.id]);
+
+  useEffect(() => {
+    if (profile?.role !== 'driver' && profile?.role !== 'both') return;
+    fetchDriverPreferredArea().then((area) => { if (area) setCorridor(area); }).catch(() => {});
+  }, [profile?.id]);
 
   const handleSignOut = async () => {
     try {
@@ -2689,6 +3818,31 @@ function ProfileScreen({ navigate }: NavProp) {
     } finally {
       setSavingName(false);
       setEditingName(false);
+    }
+  };
+
+  const saveEmergencyContact = async () => {
+    try {
+      setSavingEmergency(true);
+      await updateMyProfile({
+        emergency_contact_name: emergencyName.trim() || null,
+        emergency_contact_phone: emergencyPhone.trim() || null,
+      });
+    } catch {
+      Alert.alert('Error', 'Could not save emergency contact.');
+    } finally {
+      setSavingEmergency(false);
+    }
+  };
+
+  const saveCorridorArea = async () => {
+    try {
+      setSavingCorridor(true);
+      await saveDriverPreferredArea(corridor);
+    } catch {
+      Alert.alert('Error', 'Could not save driving area.');
+    } finally {
+      setSavingCorridor(false);
     }
   };
 
@@ -2762,6 +3916,81 @@ function ProfileScreen({ navigate }: NavProp) {
               )}
             </View>
           )}
+          {/* Emergency Contact */}
+          <Text style={[s.sectionTitle, { marginTop: 16 }]}>Emergency Contact</Text>
+          <View style={[s.card, { gap: 8 }]}>
+            <View>
+              <Text style={[s.muted, { fontSize: 11, marginBottom: 4 }]}>Contact name</Text>
+              <TextInput
+                value={emergencyName}
+                onChangeText={setEmergencyName}
+                placeholder="Full name"
+                placeholderTextColor="#bbb"
+                style={{ borderWidth: 1, borderColor: '#eee', borderRadius: 8, padding: 10, fontSize: 14 }}
+                returnKeyType="next"
+              />
+            </View>
+            <View>
+              <Text style={[s.muted, { fontSize: 11, marginBottom: 4 }]}>Phone number</Text>
+              <TextInput
+                value={emergencyPhone}
+                onChangeText={setEmergencyPhone}
+                placeholder="+1 (555) 000-0000"
+                placeholderTextColor="#bbb"
+                keyboardType="phone-pad"
+                style={{ borderWidth: 1, borderColor: '#eee', borderRadius: 8, padding: 10, fontSize: 14 }}
+                returnKeyType="done"
+                onSubmitEditing={saveEmergencyContact}
+              />
+            </View>
+            <TouchableOpacity
+              style={[s.outlineBtn, { marginTop: 0 }]}
+              onPress={saveEmergencyContact}
+              disabled={savingEmergency}
+            >
+              {savingEmergency
+                ? <ActivityIndicator size="small" color={RED} />
+                : <Text style={s.outlineBtnText}>Save emergency contact</Text>}
+            </TouchableOpacity>
+          </View>
+
+          {/* Saved Locations — passengers */}
+          {(profile?.role === 'passenger' || profile?.role === 'both') && (
+            <TouchableOpacity style={[s.outlineBtn, { marginTop: 12 }]} onPress={() => navigate('SavedLocations')}>
+              <Text style={s.outlineBtnText}>Saved locations (Home & Work)</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Driver corridor */}
+          {(profile?.role === 'driver' || profile?.role === 'both') && (
+            <View style={{ marginTop: 12 }}>
+              <Text style={[s.sectionTitle, { marginBottom: 6 }]}>My Driving Area</Text>
+              <View style={[s.card, { gap: 8 }]}>
+                <Text style={[s.muted, { fontSize: 12 }]}>
+                  Tell passengers the area you typically drive in (e.g. "Toronto Downtown", "Scarborough to Mississauga").
+                </Text>
+                <TextInput
+                  value={corridor}
+                  onChangeText={setCorridor}
+                  placeholder="e.g. Downtown Toronto"
+                  placeholderTextColor="#bbb"
+                  style={{ borderWidth: 1, borderColor: '#eee', borderRadius: 8, padding: 10, fontSize: 14 }}
+                  returnKeyType="done"
+                  onSubmitEditing={saveCorridorArea}
+                />
+                <TouchableOpacity
+                  style={[s.outlineBtn, { marginTop: 0 }]}
+                  onPress={saveCorridorArea}
+                  disabled={savingCorridor}
+                >
+                  {savingCorridor
+                    ? <ActivityIndicator size="small" color={RED} />
+                    : <Text style={s.outlineBtnText}>Save driving area</Text>}
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
           {(profile?.role === 'driver' || profile?.role === 'both') && (
             <>
               <TouchableOpacity style={[s.outlineBtn, { marginTop: 8 }]} onPress={() => navigate('PostTrip')}>
@@ -2809,6 +4038,49 @@ function ProfileScreen({ navigate }: NavProp) {
               </Text>
             </TouchableOpacity>
           )}
+          {(profile?.role === 'driver' || profile?.role === 'both') && (
+            <TouchableOpacity
+              style={[s.outlineBtn, { marginTop: 8 }]}
+              onPress={async () => {
+                try {
+                  await startConnectOnboarding();
+                } catch (e: any) {
+                  Alert.alert('Error', e.message ?? 'Could not open Stripe onboarding.');
+                }
+              }}
+            >
+              <Text style={s.outlineBtnText}>Set up card payouts (Stripe)</Text>
+              <Text style={[s.muted, { textAlign: 'center', marginTop: 2 }]}>
+                {(profile as any)?.stripe_connect_enabled ? '✓ Payouts enabled' : 'Required to receive card payments'}
+              </Text>
+            </TouchableOpacity>
+          )}
+          {/* Legal */}
+          <Text style={[s.sectionTitle, { marginTop: 16 }]}>Legal</Text>
+          <View style={s.card}>
+            {([
+              ['Copyright',            'https://rideatee.com/copyright'],
+              ['Terms & Conditions',   'https://rideatee.com/terms-of-service'],
+              ['Privacy Policy',       'https://rideatee.com/privacy'],
+              ['Data Providers',       'https://rideatee.com/data-providers'],
+              ['Software Licence',     'https://rideatee.com/software-licence'],
+              ['Location Information', 'https://rideatee.com/location-information'],
+            ] as [string, string][]).map(([label, url], i, arr) => (
+              <TouchableOpacity
+                key={label}
+                style={[
+                  s.rowBetween,
+                  { paddingVertical: 12 },
+                  i < arr.length - 1 && { borderBottomWidth: 0.5, borderColor: '#eee' },
+                ]}
+                onPress={() => Linking.openURL(url)}
+              >
+                <Text style={{ fontSize: 14, color: '#111' }}>{label}</Text>
+                <Ionicons name="open-outline" size={16} color="#aaa" />
+              </TouchableOpacity>
+            ))}
+          </View>
+
           <TouchableOpacity
             style={[s.redBtn, { opacity: signingOut ? 0.6 : 1, marginTop: 8 }]}
             onPress={handleSignOut}
@@ -3822,6 +5094,121 @@ function MyBookingsScreen({ navigate }: NavProp) {
   );
 }
 
+// ─── SAVED LOCATIONS ──────────────────────────────────────────
+function SavedLocationsScreen({ navigate }: NavProp) {
+  const { locations, loading, refresh } = useSavedLocations();
+  const [settingLabel, setSettingLabel] = useState<'home' | 'work' | null>(null);
+  const [searchText, setSearchText] = useState('');
+  const [predictions, setPredictions] = useState<PlacePrediction[]>([]);
+  const [saving, setSaving] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const onSearchChange = (text: string) => {
+    setSearchText(text);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (!text.trim()) { setPredictions([]); return; }
+    debounceRef.current = setTimeout(async () => {
+      const results = await searchPlaces(text);
+      setPredictions(results);
+    }, 250);
+  };
+
+  const pickPlace = async (pred: PlacePrediction) => {
+    if (!settingLabel) return;
+    try {
+      setSaving(true);
+      const coords = await geocodePlace(pred.place_id);
+      if (!coords) throw new Error('Could not geocode');
+      await upsertSavedLocation({ label: settingLabel, address: pred.description, lat: coords.lat, lng: coords.lng });
+      await refresh();
+      setSettingLabel(null);
+      setSearchText('');
+      setPredictions([]);
+      haptic.notify(Haptics.NotificationFeedbackType.Success);
+    } catch (e: any) {
+      Alert.alert('Error', e?.message ?? 'Could not save location');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const homeLocation = locations.find((l) => l.label === 'home');
+  const workLocation = locations.find((l) => l.label === 'work');
+
+  return (
+    <ScreenTransition>
+      <SafeAreaView style={s.screen}>
+        <TopBar title="Saved Locations" onBack={() => navigate('Profile')} />
+        <ScrollView contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
+          {(['home', 'work'] as const).map((label) => {
+            const saved = label === 'home' ? homeLocation : workLocation;
+            const icon = label === 'home' ? '🏠' : '🏢';
+            const isEditing = settingLabel === label;
+            return (
+              <View key={label} style={[s.card, { marginBottom: 12 }]}>
+                <View style={s.rowBetween}>
+                  <Text style={s.driverName}>{icon} {label.charAt(0).toUpperCase() + label.slice(1)}</Text>
+                  <TouchableOpacity onPress={() => {
+                    haptic.select();
+                    setSettingLabel(isEditing ? null : label);
+                    setSearchText('');
+                    setPredictions([]);
+                  }}>
+                    <Text style={{ color: RED, fontSize: 13 }}>{isEditing ? 'Cancel' : saved ? 'Change' : 'Set'}</Text>
+                  </TouchableOpacity>
+                </View>
+                {saved && !isEditing && (
+                  <Text style={[s.muted, { marginTop: 4 }]} numberOfLines={2}>{saved.address}</Text>
+                )}
+                {isEditing && (
+                  <View style={{ marginTop: 10 }}>
+                    <TextInput
+                      style={s.fieldInput}
+                      placeholder={`Search for ${label} address…`}
+                      placeholderTextColor="#aaa"
+                      value={searchText}
+                      onChangeText={onSearchChange}
+                      autoFocus
+                    />
+                    {saving && <ActivityIndicator style={{ marginTop: 8 }} color={RED} />}
+                    {predictions.length > 0 && (
+                      <View style={[s.suggestBox, { marginTop: 4 }]}>
+                        {predictions.map((pred) => (
+                          <TouchableOpacity key={pred.place_id} style={s.suggestRow} onPress={() => pickPlace(pred)}>
+                            <Text style={{ marginRight: 8 }}>📍</Text>
+                            <View style={{ flex: 1 }}>
+                              <Text style={s.suggestText}>{pred.main_text}</Text>
+                              {pred.secondary_text ? (
+                                <Text style={[s.suggestText, { fontSize: 11, color: '#999' }]} numberOfLines={1}>{pred.secondary_text}</Text>
+                              ) : null}
+                            </View>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                )}
+                {saved && !isEditing && (
+                  <TouchableOpacity
+                    style={{ marginTop: 8, alignSelf: 'flex-start' }}
+                    onPress={async () => {
+                      await deleteSavedLocation(saved.id);
+                      await refresh();
+                    }}
+                  >
+                    <Text style={{ fontSize: 12, color: '#aaa' }}>Remove</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            );
+          })}
+          {loading && <ActivityIndicator color={RED} />}
+        </ScrollView>
+      </SafeAreaView>
+    </ScreenTransition>
+  );
+}
+
 function ScheduledRideReminderSidecar() {
   const { showBanner } = useBanner();
   const alertedRef = useRef<Set<string>>(new Set());
@@ -3875,6 +5262,25 @@ export default function App() {
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
   const [searchOriginCoords, setSearchOriginCoords] = useState<LatLng | null>(null);
   const [searchDestinationCoords, setSearchDestinationCoords] = useState<LatLng | null>(null);
+  const [rebookRide, setRebookRide] = useState<RideType | null>(null);
+  // Driver online state — lives at App level so it survives screen navigation
+  const [driverIsOnline, setDriverIsOnline] = useState(false);
+  // Referral code captured from deep link before auth completes
+  const pendingReferralRef = React.useRef<string | null>(null);
+
+  // Capture referral code from deep link URL (ateeapp://join?ref=CODE)
+  useEffect(() => {
+    const extractRef = (url: string | null) => {
+      if (!url) return;
+      try {
+        const match = url.match(/[?&]ref=([A-Z0-9]+)/i);
+        if (match?.[1]) pendingReferralRef.current = match[1].toUpperCase();
+      } catch {}
+    };
+    Linking.getInitialURL().then(extractRef);
+    const sub = Linking.addEventListener('url', ({ url }) => extractRef(url));
+    return () => sub.remove();
+  }, []);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session: s } }) => {
@@ -3883,6 +5289,12 @@ export default function App() {
       // Auto-route returning users to their home screen
       if (s && !initialRouteDone) {
         setInitialRouteDone(true);
+        registerForPushNotifications().catch(() => {});
+        // Apply any pending referral code (only meaningful on first sign-up in same session)
+        if (pendingReferralRef.current) {
+          applyReferralCode(pendingReferralRef.current).catch(() => {});
+          pendingReferralRef.current = null;
+        }
         (async () => {
           try {
             const { data } = await supabase.from('profiles').select('role').eq('id', s.user.id).maybeSingle();
@@ -3896,6 +5308,13 @@ export default function App() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
       setSession(s);
       setAuthChecked(true);
+      if (s) {
+        registerForPushNotifications().catch(() => {});
+        if (pendingReferralRef.current) {
+          applyReferralCode(pendingReferralRef.current).catch(() => {});
+          pendingReferralRef.current = null;
+        }
+      }
     });
     return () => subscription.unsubscribe();
   }, []);
@@ -3927,6 +5346,7 @@ export default function App() {
     TripDetails: <TripDetailsScreen navigate={navigate} />,
     MyPostedTrips: <MyPostedTripsScreen navigate={navigate} />,
     MyBookings: <MyBookingsScreen navigate={navigate} />,
+    SavedLocations: <SavedLocationsScreen navigate={navigate} />,
   };
 
   if (!authChecked) {
@@ -3942,14 +5362,19 @@ export default function App() {
   }
 
   return (
+    <StripeProvider
+      publishableKey={process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY ?? ''}
+      merchantIdentifier="merchant.com.atee.rideshare"
+    >
     <BannerHost>
       <ScheduledRideReminderSidecar />
       <RideContext.Provider
-        value={{ rideId, setRideId, selectedRide, setSelectedRide, chosenBid, setChosenBid, currentScreen: screen, selectedTripId, setSelectedTripId, searchOriginCoords, setSearchOriginCoords, searchDestinationCoords, setSearchDestinationCoords }}
+        value={{ rideId, setRideId, selectedRide, setSelectedRide, chosenBid, setChosenBid, currentScreen: screen, selectedTripId, setSelectedTripId, searchOriginCoords, setSearchOriginCoords, searchDestinationCoords, setSearchDestinationCoords, rebookRide, setRebookRide, driverIsOnline, setDriverIsOnline }}
       >
         {screens[screen] ?? screens['Onboarding']}
       </RideContext.Provider>
     </BannerHost>
+    </StripeProvider>
   );
 }
 
@@ -4150,4 +5575,66 @@ const s = StyleSheet.create({
   matchBanner: { backgroundColor: '#EFF6FF', borderRadius: 12, padding: 14, marginBottom: 12, borderWidth: 1, borderColor: '#BFDBFE' },
   matchBannerTitle: { fontSize: 13, fontWeight: '600' as const, color: '#1D4ED8', marginBottom: 4 },
   matchBannerBody: { fontSize: 12, color: '#2563EB' },
+  // Plate badge
+  plateBadge: { backgroundColor: '#1a1a1a', borderRadius: 5, paddingHorizontal: 8, paddingVertical: 2, alignSelf: 'flex-start' },
+  plateBadgeText: { color: 'white', fontSize: 11, fontWeight: '700' as const, letterSpacing: 1 },
+  // Saved location chips in BookScreen
+  savedLocChip: { backgroundColor: '#f0f0f0', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6, borderWidth: 0.5, borderColor: '#ddd' },
+  savedLocChipText: { fontSize: 13, color: '#333', fontWeight: '500' as const },
+  // SOS button
+  sosBtn: { backgroundColor: '#b91c1c', borderRadius: 12, padding: 14, alignItems: 'center', marginBottom: 10 },
+  sosBtnText: { color: 'white', fontSize: 15, fontWeight: '700' as const, letterSpacing: 0.5 },
+  // Period filter tabs (earnings)
+  periodTab: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 8 },
+  periodTabActive: { backgroundColor: RED },
+  periodTabText: { fontSize: 13, color: '#888' },
+  periodTabTextActive: { color: 'white', fontWeight: '600' as const },
+  // Receipt card in trip history
+  receiptCard: { backgroundColor: '#fafafa', borderRadius: 10, padding: 12, marginTop: 8, borderWidth: 0.5, borderColor: '#eee' },
+  receiptRow: { flexDirection: 'row' as const, justifyContent: 'space-between' as const, paddingVertical: 4, borderBottomWidth: 0.5, borderColor: '#f0f0f0' },
+  receiptLabel: { fontSize: 12, color: '#888' },
+  receiptValue: { fontSize: 12, fontWeight: '500' as const, color: '#111' },
+  // Driver availability
+  driverStatusBanner: { flexDirection: 'row' as const, alignItems: 'center' as const, borderRadius: 10, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 10, gap: 8 },
+  driverStatusDot: { width: 8, height: 8, borderRadius: 4 },
+  driverStatusText: { fontSize: 13, fontWeight: '500' as const, flex: 1 },
+  noDriverBanner: { flexDirection: 'row' as const, alignItems: 'flex-start' as const, backgroundColor: '#fff7ed', borderRadius: 10, borderWidth: 1, borderColor: '#fed7aa', padding: 12, marginBottom: 8, gap: 10 },
+  noDriverBannerTitle: { fontSize: 13, fontWeight: '700' as const, color: '#c2410c', marginBottom: 2 },
+  noDriverBannerSub: { fontSize: 12, color: '#9a3412', lineHeight: 17 },
+  // Price recommendation UI
+  priceRangeRow: { flexDirection: 'row' as const, alignItems: 'center' as const, marginTop: 8, gap: 8 },
+  priceRangeLabel: { fontSize: 11, color: 'rgba(255,255,255,0.6)', fontWeight: '600' as const, letterSpacing: 0.5 },
+  priceRangePill: { backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4 },
+  priceRangePillText: { fontSize: 11, color: 'white', fontWeight: '600' as const },
+  competitorCard: { backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 10, padding: 10, marginTop: 12 },
+  competitorTitle: { fontSize: 10, color: 'rgba(255,255,255,0.5)', letterSpacing: 1, marginBottom: 6, textTransform: 'uppercase' as const },
+  competitorRow: { flexDirection: 'row' as const, alignItems: 'center' as const, paddingVertical: 3 },
+  competitorName: { fontSize: 13, color: 'rgba(255,255,255,0.7)', width: 40 },
+  competitorPrice: { fontSize: 13, color: 'rgba(255,255,255,0.5)', width: 48, textDecorationLine: 'line-through' as const },
+  competitorSaving: { fontSize: 13, color: '#86efac', fontWeight: '600' as const, flex: 1 },
+  // Referral banner
+  referralBanner: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    backgroundColor: '#fff8f0',
+    borderRadius: 12,
+    padding: 12,
+    marginVertical: 10,
+    borderWidth: 1,
+    borderColor: '#f3d9b4',
+    gap: 10,
+  },
+  referralBannerTitle: { fontSize: 13, fontWeight: '700' as const, color: '#7c2d12', marginBottom: 2 },
+  referralBannerSub: { fontSize: 11, color: '#92400e', lineHeight: 16 },
+  referralCode: { fontWeight: '800' as const, letterSpacing: 1.5, color: '#7c2d12' },
+  referralShareBtn: {
+    backgroundColor: RED,
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 5,
+  },
+  referralShareBtnText: { color: 'white', fontSize: 12, fontWeight: '700' as const },
 });

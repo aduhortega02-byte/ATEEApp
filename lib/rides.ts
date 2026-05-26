@@ -2,9 +2,10 @@
 // All ride-related Supabase calls. Import these in your screens.
 
 import { supabase } from './supabase';
-import type { Ride, RideBid, RideStatus, PaymentMethod, RidePaymentStatus } from './types';
+import type { Ride, RideBid, RideStatus, PaymentMethod, RidePaymentStatus, SharedRideGroup } from './types';
+import { notifyUser } from './notifications';
 
-export type { Ride, RideBid, RideStatus, PaymentMethod, RidePaymentStatus } from './types';
+export type { Ride, RideBid, RideStatus, PaymentMethod, RidePaymentStatus, SharedRideGroup } from './types';
 
 // ──────────────────────────────────────────────────────────────
 // PASSENGER SIDE
@@ -27,19 +28,28 @@ export async function createRide(params: {
   scheduled_for?: string;
   payment_method: PaymentMethod;
   passenger_note?: string | null;
+  seats?: number;
+  is_shared?: boolean;
+  full_price?: number;
 }): Promise<Ride> {
   const { data: user } = await supabase.auth.getUser();
+  console.log('[createRide] auth user:', user.user?.id ?? 'NOT AUTHENTICATED');
   if (!user.user) throw new Error('Not authenticated');
+
+  const insertPayload = {
+    passenger_id: user.user.id,
+    status: 'matching',
+    ...params,
+  };
+  console.log('[createRide] inserting payload:', JSON.stringify(insertPayload, null, 2));
 
   const { data, error } = await supabase
     .from('rides')
-    .insert({
-      passenger_id: user.user.id,
-      status: 'matching',
-      ...params,
-    })
+    .insert(insertPayload)
     .select()
     .single();
+
+  console.log('[createRide] response → data:', data, '| error:', JSON.stringify(error, null, 2));
 
   if (error) throw error;
   return data as Ride;
@@ -79,11 +89,15 @@ export async function chooseDriver(rideId: string, driverId: string) {
  * Passenger cancels their ride.
  */
 export async function cancelRide(rideId: string) {
+  const { data: ride } = await supabase.from('rides').select('driver_id').eq('id', rideId).single();
   const { error } = await supabase
     .from('rides')
     .update({ status: 'cancelled' })
     .eq('id', rideId);
   if (error) throw error;
+  if (ride?.driver_id) {
+    notifyUser(ride.driver_id, 'Ride cancelled', 'The passenger has cancelled their ride request.');
+  }
 }
 
 /**
@@ -131,6 +145,70 @@ export async function setDriverOnline(online: boolean, lat?: number, lng?: numbe
 }
 
 /**
+ * Update how many seats the driver has available in their car.
+ */
+export async function updateDriverAvailableSeats(seats: number): Promise<void> {
+  const { data: user } = await supabase.auth.getUser();
+  if (!user.user) throw new Error('Not authenticated');
+  const { error } = await supabase
+    .from('drivers')
+    .upsert({ user_id: user.user.id, available_seats: seats }, { onConflict: 'user_id' });
+  if (error) throw error;
+}
+
+/**
+ * After creating a shared ride, find an open group going to the same destination
+ * (within ~5 km) with enough seats, or create a new group.
+ * Updates the ride's shared_group_id, which triggers the seat-decrement trigger.
+ */
+export async function joinOrCreateSharedGroup(
+  rideId: string,
+  seats: number,
+  destLat: number,
+  destLng: number,
+): Promise<string> {
+  const RADIUS = 0.045; // ~5 km in degrees lat/lng
+
+  const { data: groups } = await supabase
+    .from('shared_ride_groups')
+    .select('id')
+    .eq('status', 'open')
+    .gte('seats_available', seats)
+    .gte('destination_lat', destLat - RADIUS)
+    .lte('destination_lat', destLat + RADIUS)
+    .gte('destination_lng', destLng - RADIUS)
+    .lte('destination_lng', destLng + RADIUS)
+    .order('seats_available', { ascending: true })
+    .limit(1);
+
+  let groupId: string;
+  if (groups && groups.length > 0) {
+    groupId = (groups[0] as { id: string }).id;
+  } else {
+    const { data: newGroup, error } = await supabase
+      .from('shared_ride_groups')
+      .insert({
+        total_seats: 4,
+        seats_available: 4,
+        destination_lat: destLat,
+        destination_lng: destLng,
+      })
+      .select('id')
+      .single();
+    if (error) throw error;
+    groupId = (newGroup as { id: string }).id;
+  }
+
+  const { error: updateErr } = await supabase
+    .from('rides')
+    .update({ shared_group_id: groupId })
+    .eq('id', rideId);
+  if (updateErr) throw updateErr;
+
+  return groupId;
+}
+
+/**
  * Driver accepts a ride request at the passenger's offered price.
  * Creates a ride_bid row. The passenger sees it appear in realtime.
  */
@@ -144,6 +222,13 @@ export async function acceptRide(rideId: string, etaMin: number) {
     .select()
     .single();
   if (error) throw error;
+
+  // Notify the passenger that a driver has bid on their ride
+  const { data: ride } = await supabase.from('rides').select('passenger_id').eq('id', rideId).single();
+  if (ride?.passenger_id) {
+    notifyUser(ride.passenger_id, 'Driver found!', `A driver accepted your ride request and is ${etaMin} min away.`);
+  }
+
   return data as RideBid;
 }
 
@@ -174,11 +259,15 @@ export async function fetchAvailableRides(): Promise<Ride[]> {
  * Driver marks an assigned ride as in-progress (they arrived at pickup).
  */
 export async function startRide(rideId: string) {
+  const { data: ride } = await supabase.from('rides').select('passenger_id').eq('id', rideId).single();
   const { error } = await supabase
     .from('rides')
     .update({ status: 'in_progress' })
     .eq('id', rideId);
   if (error) throw error;
+  if (ride?.passenger_id) {
+    notifyUser(ride.passenger_id, 'Your driver has arrived', 'Your driver is at the pickup location.');
+  }
 }
 
 /**
@@ -200,6 +289,7 @@ export async function completeRideWithPayment(
   rideId: string,
   paymentStatus: 'paid' | 'disputed',
 ) {
+  const { data: ride } = await supabase.from('rides').select('passenger_id, driver_id').eq('id', rideId).single();
   const { error } = await supabase
     .from('rides')
     .update({
@@ -209,4 +299,10 @@ export async function completeRideWithPayment(
     })
     .eq('id', rideId);
   if (error) throw error;
+  if (ride?.passenger_id) {
+    notifyUser(ride.passenger_id, 'Ride complete', 'You have arrived. Rate your driver!');
+  }
+  if (ride?.driver_id) {
+    notifyUser(ride.driver_id, 'Ride complete', 'Great work! Earnings have been added to your wallet.');
+  }
 }

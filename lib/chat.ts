@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { notifyUser } from './notifications';
 
 export type ChatMessageType = 'text' | 'location' | 'quick_reply';
 
@@ -28,6 +29,7 @@ export async function sendTextMessage(
     .select()
     .single();
   if (error) throw error;
+  notifyUser(recipientId, 'New message', body.length > 80 ? body.slice(0, 77) + '…' : body);
   return data as ChatMessage;
 }
 

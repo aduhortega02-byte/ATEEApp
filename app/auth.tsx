@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   SafeAreaView,
   ScrollView,
@@ -14,6 +15,7 @@ import {
   View,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { applyReferralCode } from '../lib/referrals';
 
 const RED = '#8B0000';
 
@@ -25,9 +27,11 @@ export default function AuthScreen({ onSignedIn }: Props) {
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
   const [role, setRole] = useState<'passenger' | 'driver'>('passenger');
+  const [referralCode, setReferralCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [resetLoading, setResetLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
 
   const switchMode = (next: 'signin' | 'signup') => {
     setMode(next);
@@ -73,6 +77,10 @@ export default function AuthScreen({ onSignedIn }: Props) {
 
   const submit = async () => {
     if (loading) return;
+    if (mode === 'signup' && !agreedToTerms) {
+      setError('Please agree to the Terms of Service and Privacy Policy to continue.');
+      return;
+    }
     setError(null);
     setLoading(true);
     try {
@@ -83,6 +91,11 @@ export default function AuthScreen({ onSignedIn }: Props) {
           options: { data: { full_name: fullName, role } },
         });
         if (err) throw err;
+        if (referralCode.trim()) {
+          // The DB trigger that creates the profile row is async; wait briefly before applying
+          const code = referralCode.trim();
+          setTimeout(() => applyReferralCode(code).catch(() => {}), 1500);
+        }
       } else {
         const { error: err } = await supabase.auth.signInWithPassword({ email, password });
         if (err) throw err;
@@ -161,6 +174,17 @@ export default function AuthScreen({ onSignedIn }: Props) {
                       </Text>
                     </TouchableOpacity>
                   </View>
+
+                  <Text style={s.label}>REFERRAL CODE (optional)</Text>
+                  <TextInput
+                    style={s.input}
+                    placeholder="e.g. ABC12345"
+                    placeholderTextColor="#aaa"
+                    value={referralCode}
+                    onChangeText={(t) => setReferralCode(t.toUpperCase())}
+                    autoCapitalize="characters"
+                    autoCorrect={false}
+                  />
                 </>
               )}
 
@@ -194,6 +218,34 @@ export default function AuthScreen({ onSignedIn }: Props) {
                 >
                   <Text style={{ fontSize: 12, color: '#c0392b' }}>
                     {resetLoading ? 'Sending…' : 'Forgot password?'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+
+              {mode === 'signup' && (
+                <TouchableOpacity
+                  style={s.termsRow}
+                  onPress={() => setAgreedToTerms((v) => !v)}
+                  activeOpacity={0.7}
+                >
+                  <View style={[s.checkbox, agreedToTerms && s.checkboxChecked]}>
+                    {agreedToTerms && <Text style={s.checkmark}>✓</Text>}
+                  </View>
+                  <Text style={s.termsText}>
+                    {'I agree to the '}
+                    <Text
+                      style={s.termsLink}
+                      onPress={() => Linking.openURL('https://rideatee.com/terms-of-service')}
+                    >
+                      Terms of Service
+                    </Text>
+                    {' and '}
+                    <Text
+                      style={s.termsLink}
+                      onPress={() => Linking.openURL('https://rideatee.com/privacy-policy')}
+                    >
+                      Privacy Policy
+                    </Text>
                   </Text>
                 </TouchableOpacity>
               )}
@@ -296,12 +348,50 @@ const s = StyleSheet.create({
     marginTop: 12,
     textAlign: 'center',
   },
+  termsRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginTop: 18,
+    gap: 10,
+  },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 1.5,
+    borderColor: '#ccc',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 1,
+    flexShrink: 0,
+  },
+  checkboxChecked: {
+    backgroundColor: RED,
+    borderColor: RED,
+  },
+  checkmark: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 14,
+  },
+  termsText: {
+    flex: 1,
+    fontSize: 12,
+    color: '#555',
+    lineHeight: 18,
+  },
+  termsLink: {
+    color: RED,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
   submitBtn: {
     backgroundColor: RED,
     borderRadius: 10,
     padding: 14,
     alignItems: 'center',
-    marginTop: 20,
+    marginTop: 14,
   },
   submitText: { color: 'white', fontSize: 14, fontWeight: '600' },
 });

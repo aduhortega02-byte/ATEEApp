@@ -128,3 +128,29 @@ export async function fetchRecentTransactions(limit = 10): Promise<EarningEntry[
 export async function fetchRecentEarnings(limit = 10): Promise<EarningEntry[]> {
   return fetchRecentTransactions(limit);
 }
+
+export async function fetchDriverCancelRate(): Promise<{ cancelled: number; total: number; acceptanceRate: number }> {
+  const { data: u } = await supabase.auth.getUser();
+  if (!u.user) return { cancelled: 0, total: 0, acceptanceRate: 100 };
+  const [totalRes, cancelledRes] = await Promise.all([
+    supabase.from('rides').select('*', { count: 'exact', head: true }).eq('driver_id', u.user.id),
+    supabase.from('rides').select('*', { count: 'exact', head: true }).eq('driver_id', u.user.id).eq('status', 'cancelled'),
+  ]);
+  const total = totalRes.count ?? 0;
+  const cancelled = cancelledRes.count ?? 0;
+  const acceptanceRate = total > 0 ? Math.round(((total - cancelled) / total) * 100) : 100;
+  return { cancelled, total, acceptanceRate };
+}
+
+export async function saveDriverPreferredArea(area: string): Promise<void> {
+  const { data: u } = await supabase.auth.getUser();
+  if (!u.user) throw new Error('Not authenticated');
+  await supabase.from('drivers').upsert({ user_id: u.user.id, preferred_area: area.trim() || null }, { onConflict: 'user_id' });
+}
+
+export async function fetchDriverPreferredArea(): Promise<string | null> {
+  const { data: u } = await supabase.auth.getUser();
+  if (!u.user) return null;
+  const { data } = await supabase.from('drivers').select('preferred_area').eq('user_id', u.user.id).maybeSingle();
+  return (data as { preferred_area: string | null } | null)?.preferred_area ?? null;
+}

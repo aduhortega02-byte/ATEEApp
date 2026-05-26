@@ -39,5 +39,6 @@ export function useDriverVehicle(driverId: string | null | undefined) {
     loading,
     displayString: formatVehicleDisplay(vehicle),
     seats: vehicle?.vehicle_total_seats ?? null,
+    plate: vehicle?.plate_number ?? null,
   };
 }

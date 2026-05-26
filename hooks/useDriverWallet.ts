@@ -25,7 +25,7 @@ export function useDriverWallet() {
       try {
         const [stats, earnings] = await Promise.all([
           fetchDriverStats(),
-          fetchRecentTransactions(10),
+          fetchRecentTransactions(100),
         ]);
         if (!cancelled) setState({ ...stats, earnings, loading: false });
       } catch (e) {

@@ -2,6 +2,7 @@ export default {
   expo: {
     name: 'ATEEApp',
     slug: 'ATEEApp',
+    owner: 'tegaaduhor',
     version: '1.0.0',
     orientation: 'portrait',
     icon: './assets/images/icon.png',
@@ -10,12 +11,14 @@ export default {
     newArchEnabled: true,
     ios: {
       supportsTablet: true,
+      bundleIdentifier: 'com.atee.rideshare',
       config: {
         // Injected from .env at build time — never hardcoded.
         googleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY,
       },
     },
     android: {
+      package: 'com.atee.rideshare',
       adaptiveIcon: {
         backgroundColor: '#E6F4FE',
         foregroundImage: './assets/images/android-icon-foreground.png',
@@ -37,6 +40,18 @@ export default {
     },
     plugins: [
       'expo-router',
+      ['@stripe/stripe-react-native', {
+        merchantIdentifier: 'merchant.com.atee.rideshare',
+        enableGooglePay: true,
+      }],
+      [
+        'expo-notifications',
+        {
+          icon: './assets/images/icon.png',
+          color: '#8B0000',
+          sounds: [],
+        },
+      ],
       [
         'expo-splash-screen',
         {

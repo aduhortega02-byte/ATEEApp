@@ -115,7 +115,12 @@ create policy "drivers_write_self" on public.drivers
   for all using (auth.uid() = user_id);
 
 -- Rides: passenger sees own rides; drivers see rides they're bidding on or assigned to;
--- online drivers see all 'requested' rides (to build a queue)
+-- online drivers see rides with open statuses so they can build their queue.
+-- 'matching' is the status used when a passenger submits a booking.
+-- 'cancelled' is included so Supabase Realtime can deliver cancellation events:
+-- Realtime v2 evaluates SELECT RLS on the NEW row state, so a ride transitioning
+-- to 'cancelled' would be invisible to drivers (and the event silently dropped)
+-- without this addition.
 drop policy if exists "rides_passenger_read" on public.rides;
 create policy "rides_passenger_read" on public.rides
   for select using (auth.uid() = passenger_id);
@@ -124,7 +129,7 @@ drop policy if exists "rides_driver_read" on public.rides;
 create policy "rides_driver_read" on public.rides
   for select using (
     auth.uid() = driver_id
-    or (status = 'requested' and exists (
+    or (status in ('requested', 'matching', 'cancelled') and exists (
       select 1 from public.drivers d where d.user_id = auth.uid() and d.is_online = true
     ))
   );

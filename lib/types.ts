@@ -18,6 +18,10 @@ export type Profile = {
   rating: number;
   total_trips: number;
   created_at: string;
+  emergency_contact_name: string | null;
+  emergency_contact_phone: string | null;
+  referral_code: string | null;
+  referred_by: string | null;
 };
 
 // ── Drivers ──────────────────────────────────────────────────
@@ -33,6 +37,7 @@ export type Driver = {
   current_lng: number | null;
   is_verified: boolean;
   subscription_active: boolean;
+  available_seats: number;
   last_seen: string;
 };
 
@@ -138,8 +143,8 @@ export type RideStatus =
   | 'completed'
   | 'cancelled';
 
-export type PaymentMethod = 'cash' | 'etransfer';
-export type RidePaymentStatus = 'pending' | 'paid' | 'disputed';
+export type PaymentMethod = 'cash' | 'etransfer' | 'card';
+export type RidePaymentStatus = 'pending' | 'paid' | 'disputed' | 'refunded';
 
 export type Ride = {
   id: string;
@@ -159,8 +164,44 @@ export type Ride = {
   payment_status: RidePaymentStatus;
   scheduled_for: string | null;
   passenger_note: string | null;
+  seats: number;
+  is_shared: boolean;
+  full_price: number | null;
+  shared_group_id: string | null;
   created_at: string;
   completed_at: string | null;
+};
+
+// ── Shared Rides ─────────────────────────────────────────────
+
+// ── Negotiations ──────────────────────────────────────────────
+
+export type NegotiationStatus = 'pending' | 'accepted' | 'declined' | 'cancelled';
+export type NegotiationCreatedBy = 'driver' | 'passenger';
+
+export type RideNegotiation = {
+  id: string;
+  ride_id: string;
+  driver_id: string;
+  passenger_id: string;
+  offered_price: number;
+  status: NegotiationStatus;
+  round: number;
+  created_by: NegotiationCreatedBy;
+  created_at: string;
+};
+
+export type SharedGroupStatus = 'open' | 'full' | 'in_progress' | 'completed' | 'cancelled';
+
+export type SharedRideGroup = {
+  id: string;
+  driver_id: string | null;
+  total_seats: number;
+  seats_available: number;
+  destination_lat: number | null;
+  destination_lng: number | null;
+  status: SharedGroupStatus;
+  created_at: string;
 };
 
 export type RideBid = {

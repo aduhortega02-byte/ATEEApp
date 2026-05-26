@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { fetchProfileById } from '../lib/profile';
 import type { Profile } from '../lib/types';
 
-type BasicProfile = Pick<Profile, 'id' | 'full_name' | 'rating' | 'total_trips'>;
+type BasicProfile = Pick<Profile, 'id' | 'full_name' | 'rating' | 'total_trips' | 'phone'>;
 
 export function useUserProfile(userId: string | null | undefined) {
   const [profile, setProfile] = useState<BasicProfile | null>(null);

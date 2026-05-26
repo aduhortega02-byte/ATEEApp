@@ -204,6 +204,34 @@ export async function getRouteInfo(
   });
 }
 
+// ── Driver ETA (Distance Matrix) ─────────────────────────────
+// Calculates real driving ETA from the driver's current position to the
+// passenger pickup point. Used by useDriverEta to update every 30 seconds.
+export async function getDriverEtaToPickup(
+  driverPos: LatLng,
+  pickup: LatLng,
+): Promise<{ etaMin: number; distanceM: number } | null> {
+  if (!API_KEY) return null;
+  const url =
+    `https://maps.googleapis.com/maps/api/distancematrix/json` +
+    `?origins=${driverPos.lat},${driverPos.lng}` +
+    `&destinations=${pickup.lat},${pickup.lng}` +
+    `&mode=driving` +
+    `&key=${API_KEY}`;
+  try {
+    const res = await fetch(url);
+    const json = await res.json();
+    const element = json.rows?.[0]?.elements?.[0];
+    if (!element || element.status !== 'OK') return null;
+    return {
+      etaMin: Math.max(1, Math.round(element.duration.value / 60)),
+      distanceM: element.distance.value,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function reverseGeocode(point: LatLng): Promise<string | null> {
   if (Platform.OS !== 'web') return nativeReverseGeocode(point);
   const g = await loadGoogle();
