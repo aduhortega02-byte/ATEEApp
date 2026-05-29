@@ -271,6 +271,23 @@ export async function startRide(rideId: string) {
 }
 
 /**
+ * Driver verifies the passenger's 4-digit pickup code.
+ * On success the server sets ride status to 'in_progress'.
+ * The raw code is never returned — verification is server-side only.
+ */
+export async function verifyPickupCode(
+  rideId: string,
+  code: string,
+): Promise<{ success: boolean; error?: string; attemptsLeft?: number }> {
+  const { data, error } = await supabase.rpc('verify_pickup_code', {
+    p_ride_id: rideId,
+    p_code: code,
+  });
+  if (error) throw error;
+  return data as { success: boolean; error?: string; attemptsLeft?: number };
+}
+
+/**
  * Driver marks a ride as completed.
  */
 export async function completeRide(rideId: string) {

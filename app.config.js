@@ -9,16 +9,22 @@ export default {
     scheme: 'ateeapp',
     userInterfaceStyle: 'automatic',
     newArchEnabled: true,
+    updates: {
+      url: 'https://u.expo.dev/23ae8dc7-4a8c-40e1-a8c2-58cff8481491',
+    },
+    runtimeVersion: {
+      policy: 'appVersion',
+    },
     ios: {
       supportsTablet: true,
-      bundleIdentifier: 'com.atee.rideshare',
+      bundleIdentifier: 'com.rideatee.app',
       config: {
         // Injected from .env at build time — never hardcoded.
         googleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY,
       },
     },
     android: {
-      package: 'com.atee.rideshare',
+      package: 'com.rideatee.app',
       adaptiveIcon: {
         backgroundColor: '#E6F4FE',
         foregroundImage: './assets/images/android-icon-foreground.png',
@@ -40,8 +46,9 @@ export default {
     },
     plugins: [
       'expo-router',
+      '@sentry/react-native/expo',
       ['@stripe/stripe-react-native', {
-        merchantIdentifier: 'merchant.com.atee.rideshare',
+        merchantIdentifier: 'merchant.com.rideatee.app',
         enableGooglePay: true,
       }],
       [

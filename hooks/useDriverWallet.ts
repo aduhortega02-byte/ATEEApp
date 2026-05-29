@@ -1,48 +1,37 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../lib/supabase';
-import { fetchDriverStats, fetchRecentTransactions, type EarningEntry, type DriverStats } from '../lib/driver';
+import { fetchDriverStats, fetchRecentTransactions } from '../lib/driver';
+import { QK, CACHE_TTL } from '../lib/queryClient';
 
-type WalletState = DriverStats & {
-  earnings: EarningEntry[];
-  loading: boolean;
-};
+async function fetchWallet() {
+  const [stats, earnings] = await Promise.all([
+    fetchDriverStats(),
+    fetchRecentTransactions(100),
+  ]);
+  return { ...stats, earnings };
+}
 
 export function useDriverWallet() {
-  const [state, setState] = useState<WalletState>({
-    total_earned_cents: 0,
-    total_cash_cents: 0,
-    total_etransfer_cents: 0,
-    trips_completed: 0,
-    trips_disputed: 0,
-    earnings: [],
-    loading: true,
+  const queryClient = useQueryClient();
+
+  const { data, isLoading: loading } = useQuery({
+    queryKey: QK.driverWallet,
+    queryFn: fetchWallet,
+    staleTime: CACHE_TTL.wallet,
   });
 
+  // Realtime: invalidate when a wallet row changes.
   useEffect(() => {
     let cancelled = false;
-
-    async function load() {
-      try {
-        const [stats, earnings] = await Promise.all([
-          fetchDriverStats(),
-          fetchRecentTransactions(100),
-        ]);
-        if (!cancelled) setState({ ...stats, earnings, loading: false });
-      } catch (e) {
-        console.warn('[useDriverWallet]', e);
-        if (!cancelled) setState((s) => ({ ...s, loading: false }));
-      }
-    }
-
-    load();
-
-    // Keep wallet stats live via Realtime
     const channel = supabase
-      .channel('driver_wallet_live')
+      .channel('driver-wallet-rq')
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'driver_wallets' },
-        () => { if (!cancelled) load(); },
+        () => {
+          if (!cancelled) queryClient.invalidateQueries({ queryKey: QK.driverWallet });
+        },
       )
       .subscribe();
 
@@ -50,17 +39,16 @@ export function useDriverWallet() {
       cancelled = true;
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [queryClient]);
 
   return {
-    totalEarnedCents: state.total_earned_cents,
-    totalCashCents: state.total_cash_cents,
-    totalEtransferCents: state.total_etransfer_cents,
-    tripsCompleted: state.trips_completed,
-    tripsDisputed: state.trips_disputed,
-    earnings: state.earnings,
-    loading: state.loading,
-    // kept for any remaining callers that used the old name
-    balanceCents: state.total_earned_cents,
+    totalEarnedCents:    data?.total_earned_cents    ?? 0,
+    totalCashCents:      data?.total_cash_cents      ?? 0,
+    totalEtransferCents: data?.total_etransfer_cents ?? 0,
+    tripsCompleted:      data?.trips_completed       ?? 0,
+    tripsDisputed:       data?.trips_disputed        ?? 0,
+    earnings:            data?.earnings              ?? [],
+    loading,
+    balanceCents:        data?.total_earned_cents    ?? 0,
   };
 }

@@ -1,18 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { fetchRecentRidesForPassenger } from '../lib/passenger';
-import type { Ride } from '../lib/types';
+import { QK, CACHE_TTL } from '../lib/queryClient';
 
 export function usePassengerRecentRides() {
-  const [rides, setRides] = useState<Ride[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: rides, isLoading: loading } = useQuery({
+    queryKey: QK.rideHistory,
+    queryFn: fetchRecentRidesForPassenger,
+    staleTime: CACHE_TTL.rideHistory,
+  });
 
-  useEffect(() => {
-    let cancelled = false;
-    fetchRecentRidesForPassenger()
-      .then((data) => { if (!cancelled) { setRides(data); setLoading(false); } })
-      .catch((e) => { console.warn('[usePassengerRecentRides]', e); if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, []);
-
-  return { rides, loading };
+  return { rides: rides ?? [], loading };
 }

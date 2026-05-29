@@ -44,6 +44,7 @@ import {
   createRide,
   joinOrCreateSharedGroup,
   updateDriverAvailableSeats,
+  verifyPickupCode,
   PaymentMethod,
   Ride,
   RideBid,
@@ -294,7 +295,13 @@ function TopBar({
   return (
     <View style={s.topBar}>
       {onBack ? (
-        <TouchableOpacity onPress={onBack}>
+        <TouchableOpacity
+          onPress={onBack}
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 20 }}
+          style={{ minHeight: 44, justifyContent: 'center' }}
+        >
           <Text style={s.backBtn}>← Back</Text>
         </TouchableOpacity>
       ) : (
@@ -304,7 +311,13 @@ function TopBar({
       {rightElement ? (
         <View style={{ width: 60, alignItems: 'flex-end' }}>{rightElement}</View>
       ) : onRight && rightLabel ? (
-        <TouchableOpacity onPress={onRight}>
+        <TouchableOpacity
+          onPress={onRight}
+          accessibilityRole="button"
+          accessibilityLabel={rightLabel}
+          hitSlop={{ top: 10, bottom: 10, left: 20, right: 10 }}
+          style={{ minHeight: 44, justifyContent: 'center' }}
+        >
           <Text style={s.switchRoleText}>{rightLabel}</Text>
         </TouchableOpacity>
       ) : (
@@ -365,6 +378,9 @@ function BottomNav({
               haptic.select();
               navigate(routes[tab]);
             }}
+            accessibilityRole="tab"
+            accessibilityLabel={tab}
+            accessibilityState={{ selected: isActive }}
           >
             <Ionicons
               name={isActive ? icons.filled : icons.outline}
@@ -402,6 +418,8 @@ function OnboardingScreen({ navigate }: NavProp) {
                   haptic.impact();
                   navigate('Home');
                 }}
+                accessibilityRole="button"
+                accessibilityLabel="Continue as Passenger"
               >
                 <Text style={s.redBtnText}>Continue as Passenger →</Text>
               </TouchableOpacity>
@@ -415,12 +433,19 @@ function OnboardingScreen({ navigate }: NavProp) {
                   haptic.impact();
                   navigate('DriverHome');
                 }}
+                accessibilityRole="button"
+                accessibilityLabel="Continue as Driver"
               >
                 <Text style={s.ghostBtnText}>Continue as Driver →</Text>
               </TouchableOpacity>
             </View>
           </View>
-          <TouchableOpacity onPress={() => navigate('Auth')}>
+          <TouchableOpacity
+            onPress={() => navigate('Auth')}
+            accessibilityRole="button"
+            accessibilityLabel="Already have an account? Sign in to ATEE"
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
             <Text style={s.signInText}>
               Already have an account?{' '}
               <Text style={{ textDecorationLine: 'underline' }}>Sign in to ATEE</Text>
@@ -459,7 +484,12 @@ function ReferralBanner() {
           Share your code <Text style={s.referralCode}>{referralCode}</Text> — friends join, everyone wins
         </Text>
       </View>
-      <TouchableOpacity style={s.referralShareBtn} onPress={handleShare}>
+      <TouchableOpacity
+        style={s.referralShareBtn}
+        onPress={handleShare}
+        accessibilityRole="button"
+        accessibilityLabel="Share referral code"
+      >
         <Ionicons name="share-social-outline" size={16} color="white" />
         <Text style={s.referralShareBtnText}>Invite</Text>
       </TouchableOpacity>
@@ -1966,6 +1996,31 @@ function ConfirmedScreen({ navigate }: NavProp) {
   const arrivedNotifiedRef = useRef(false);
   const selfCancelledRef = useRef(false);
 
+  const [pickupCode, setPickupCode] = useState<string | null>(null);
+
+  // Fetch and subscribe to the pickup code when driver is assigned
+  useEffect(() => {
+    if (!rideId || status !== 'driver_assigned') return;
+
+    supabase
+      .from('pickup_codes')
+      .select('code')
+      .eq('ride_id', rideId)
+      .single()
+      .then(({ data }) => { if (data?.code) setPickupCode(data.code); });
+
+    const channel = supabase
+      .channel(`pickup_code_${rideId}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'pickup_codes', filter: `ride_id=eq.${rideId}` },
+        (payload) => { setPickupCode((payload.new as any).code); },
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [rideId, status]);
+
   useEffect(() => {
     haptic.notify(Haptics.NotificationFeedbackType.Success);
   }, []);
@@ -2173,6 +2228,27 @@ function ConfirmedScreen({ navigate }: NavProp) {
                   ) : null}
                 </View>
               </View>
+            </View>
+          )}
+          {status === 'driver_assigned' && pickupCode && (
+            <View style={[s.card, { marginBottom: 12, backgroundColor: '#FFF5F5', borderColor: RED, borderWidth: 1.5, alignItems: 'center', paddingVertical: 20 }]}>
+              <Ionicons name="shield-checkmark" size={24} color={RED} style={{ marginBottom: 6 }} />
+              <Text style={{ fontSize: 13, fontWeight: '700', color: RED, letterSpacing: 0.5, marginBottom: 12 }}>
+                SHOW THIS CODE TO YOUR DRIVER
+              </Text>
+              <View style={{ flexDirection: 'row', gap: 10, marginBottom: 10 }}>
+                {pickupCode.split('').map((digit, i) => (
+                  <View
+                    key={i}
+                    style={{ width: 56, height: 64, borderRadius: 10, backgroundColor: 'white', borderWidth: 2, borderColor: RED, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 4, elevation: 2 }}
+                  >
+                    <Text style={{ fontSize: 32, fontWeight: '800', color: '#111', letterSpacing: 2 }}>{digit}</Text>
+                  </View>
+                ))}
+              </View>
+              <Text style={{ fontSize: 11, color: '#888', textAlign: 'center' }}>
+                Your driver will enter this code to confirm pickup
+              </Text>
             </View>
           )}
           <View style={s.card}>
@@ -2617,9 +2693,7 @@ function DriverRequestScreen({ navigate }: NavProp) {
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={s.driverName}>{passengerProfile?.full_name ?? 'Passenger'}</Text>
-                  <Text style={s.muted}>
-                    ⭐ {passengerProfile?.rating?.toFixed(1) ?? '5.0'} · {passengerProfile?.total_trips ?? 0} trips
-                  </Text>
+                  <Text style={s.muted}>{passengerProfile?.total_trips ?? 0} trips</Text>
                 </View>
               </View>
               <View style={s.divider} />
@@ -2698,7 +2772,10 @@ function DriverRequestScreen({ navigate }: NavProp) {
                     {isDriver && n.status === 'pending' && (
                       <TouchableOpacity
                         onPress={() => handleCancelMyOffer(n.id)}
-                        style={{ justifyContent: 'center', paddingLeft: 8 }}
+                        style={{ justifyContent: 'center', paddingLeft: 8, minWidth: 44, minHeight: 44, alignItems: 'center' }}
+                        accessibilityRole="button"
+                        accessibilityLabel="Cancel offer"
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                       >
                         <Ionicons name="close-circle" size={18} color="#ccc" />
                       </TouchableOpacity>
@@ -2767,6 +2844,10 @@ function DriverActiveScreen({ navigate }: NavProp) {
   const { showBanner } = useBanner();
   const [loading, setLoading] = useState(false);
   const [showPayConfirm, setShowPayConfirm] = useState(false);
+  const [phase, setPhase] = useState<'verify' | 'active'>('verify');
+  const [codeInput, setCodeInput] = useState('');
+  const [codeError, setCodeError] = useState<string | null>(null);
+  const [codeLoading, setCodeLoading] = useState(false);
 
   const handleChatMessage = useCallback((body: string) => {
     if (currentScreen !== 'Chat') showBanner(`Passenger: ${body.slice(0, 60)}`, 'info');
@@ -2835,12 +2916,47 @@ function DriverActiveScreen({ navigate }: NavProp) {
     }
   };
 
-  const handleStart = async () => {
-    if (!selectedRide) return;
-    try { await startRide(selectedRide.id); } catch (e) { console.warn(e); }
-  };
+  // Transition to active phase when server confirms in_progress
+  useEffect(() => {
+    if (liveStatus === 'in_progress') setPhase('active');
+  }, [liveStatus]);
 
-  useEffect(() => { handleStart(); }, []);
+  const handleVerifyCode = async () => {
+    if (!selectedRide || codeInput.length !== 4 || codeLoading) return;
+    try {
+      setCodeLoading(true);
+      setCodeError(null);
+      const result = await verifyPickupCode(selectedRide.id, codeInput);
+      if (result.success) {
+        haptic.notify(Haptics.NotificationFeedbackType.Success);
+        // liveStatus will flip to 'in_progress' via Realtime → phase becomes 'active'
+      } else if (result.error === 'max_attempts') {
+        haptic.notify(Haptics.NotificationFeedbackType.Error);
+        setCodeInput('');
+        if (Platform.OS === 'web') {
+          (globalThis as any).alert('Too many failed attempts. Please contact support to resolve the pickup.');
+        } else {
+          Alert.alert(
+            'Too many attempts',
+            'Please contact support or ask the passenger to cancel and rebook.',
+          );
+        }
+      } else {
+        haptic.notify(Haptics.NotificationFeedbackType.Error);
+        const left = result.attemptsLeft ?? 0;
+        setCodeError(
+          left > 0
+            ? `Incorrect code — ${left} attempt${left !== 1 ? 's' : ''} remaining`
+            : 'Incorrect code.',
+        );
+        setCodeInput('');
+      }
+    } catch (e: any) {
+      setCodeError('Verification failed. Please try again.');
+    } finally {
+      setCodeLoading(false);
+    }
+  };
 
   if (!selectedRide) {
     return (
@@ -2929,74 +3045,114 @@ function DriverActiveScreen({ navigate }: NavProp) {
           </View>
         </View>
         <ScrollView contentContainerStyle={{ padding: 16 }}>
-          <View style={s.card}>
-            <View style={s.driverCardInner}>
-              <View style={[s.avatarCircle, { backgroundColor: RED }]}>
-                <Text style={s.avatarText}>{getInitials(passengerProfile?.full_name ?? undefined)}</Text>
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={s.driverName}>{passengerProfile?.full_name ?? 'Passenger'}</Text>
-                <Text style={s.muted}>
-                  ⭐ {passengerProfile?.rating?.toFixed(1) ?? '5.0'} · Pickup in progress
-                </Text>
-              </View>
-              <Text style={[s.tripPrice, { color: RED }]}>${selectedRide.offered_price.toFixed(2)}</Text>
-            </View>
-            <View style={s.divider} />
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <Text style={s.cardLabel}>PAYMENT METHOD</Text>
-              <View style={s.greenBadge}>
-                <Text style={s.greenBadgeText}>{payMethodLabel}</Text>
-              </View>
-            </View>
-          </View>
-          <View style={s.statRow}>
-            <View style={s.statBox}><Text style={s.statLabel}>ETA</Text><Text style={s.statValue}>{selectedRide.eta_min != null ? `${selectedRide.eta_min} min` : '—'}</Text></View>
-            <View style={s.statBox}><Text style={s.statLabel}>Distance</Text><Text style={s.statValue}>{selectedRide.distance_mi != null ? `${selectedRide.distance_mi} mi` : '—'}</Text></View>
-          </View>
-
-          {selectedRide.passenger_note ? (
-            <View style={{ backgroundColor: '#FEF3C7', borderRadius: 8, padding: 10, marginBottom: 12 }}>
-              <Text style={{ fontSize: 12, color: '#92400E', fontWeight: '600', marginBottom: 2 }}>📝 Note from passenger</Text>
-              <Text style={{ fontSize: 13, color: '#78350F' }}>{selectedRide.passenger_note}</Text>
-            </View>
-          ) : null}
-
-          {!showPayConfirm ? (
-            <TouchableOpacity style={s.redBtn} onPress={handleComplete} disabled={loading}>
-              <Text style={s.redBtnText}>Complete Trip</Text>
-            </TouchableOpacity>
-          ) : (
-            <View style={[s.card, { backgroundColor: '#fdf6ec', borderColor: AMBER }]}>
-              <Text style={[s.driverName, { marginBottom: 4 }]}>Did the passenger pay?</Text>
-              <Text style={[s.muted, { marginBottom: 12 }]}>
-                {selectedRide.payment_method === 'etransfer'
-                  ? 'Confirm you received the e-transfer.'
-                  : 'Confirm you received cash.'}
+          {phase === 'verify' ? (
+            <View style={[s.card, { alignItems: 'center', paddingVertical: 28 }]}>
+              <Ionicons name="shield-checkmark" size={40} color={RED} style={{ marginBottom: 10 }} />
+              <Text style={[s.bigTitle, { textAlign: 'center', marginBottom: 6 }]}>Enter Pickup Code</Text>
+              <Text style={[s.muted, { textAlign: 'center', marginBottom: 20 }]}>
+                Ask the passenger for their 4-digit code and enter it below
               </Text>
+              <View style={{ flexDirection: 'row', gap: 10, marginBottom: 16 }}>
+                {[0, 1, 2, 3].map((i) => (
+                  <View
+                    key={i}
+                    style={{ width: 56, height: 64, borderRadius: 10, borderWidth: 2, borderColor: codeInput.length > i ? RED : '#ddd', backgroundColor: codeInput.length > i ? '#FFF5F5' : '#f8f8f8', alignItems: 'center', justifyContent: 'center' }}
+                  >
+                    <Text style={{ fontSize: 30, fontWeight: '800', color: '#111' }}>{codeInput[i] ?? ''}</Text>
+                  </View>
+                ))}
+              </View>
+              <TextInput
+                value={codeInput}
+                onChangeText={(t) => { setCodeError(null); setCodeInput(t.replace(/[^0-9]/g, '').slice(0, 4)); }}
+                keyboardType="number-pad"
+                maxLength={4}
+                placeholder="4-digit code"
+                placeholderTextColor="#bbb"
+                style={{ width: '60%', borderWidth: 1.5, borderColor: '#e0e0e0', borderRadius: 10, paddingHorizontal: 16, paddingVertical: 10, fontSize: 22, textAlign: 'center', letterSpacing: 8, backgroundColor: 'white', marginBottom: 8 }}
+                autoFocus
+              />
+              {codeError ? (
+                <Text style={{ color: RED, fontSize: 13, marginBottom: 10, textAlign: 'center' }}>{codeError}</Text>
+              ) : null}
               <TouchableOpacity
-                style={[s.redBtn, { backgroundColor: GREEN, opacity: loading ? 0.6 : 1 }]}
-                onPress={() => confirmPayment('paid')}
-                disabled={loading}
+                style={[s.redBtn, { width: '100%', opacity: (codeInput.length !== 4 || codeLoading) ? 0.5 : 1 }]}
+                onPress={handleVerifyCode}
+                disabled={codeInput.length !== 4 || codeLoading}
               >
-                {loading
+                {codeLoading
                   ? <ActivityIndicator color="white" />
-                  : <Text style={s.redBtnText}>Yes, Paid ✓</Text>}
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[s.outlineBtn, { borderColor: RED, marginTop: 8, opacity: loading ? 0.6 : 1 }]}
-                onPress={() => confirmPayment('disputed')}
-                disabled={loading}
-              >
-                <Text style={[s.outlineBtnText, { color: RED }]}>Not Paid — Mark Disputed</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={{ alignItems: 'center', marginTop: 10 }}
-                onPress={() => setShowPayConfirm(false)}
-              >
-                <Text style={s.muted}>← Go back</Text>
+                  : <Text style={s.redBtnText}>Confirm Pickup</Text>}
               </TouchableOpacity>
             </View>
+          ) : (
+            <>
+              <View style={s.card}>
+                <View style={s.driverCardInner}>
+                  <View style={[s.avatarCircle, { backgroundColor: RED }]}>
+                    <Text style={s.avatarText}>{getInitials(passengerProfile?.full_name ?? undefined)}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.driverName}>{passengerProfile?.full_name ?? 'Passenger'}</Text>
+                    <Text style={s.muted}>Trip in progress</Text>
+                  </View>
+                  <Text style={[s.tripPrice, { color: RED }]}>${selectedRide.offered_price.toFixed(2)}</Text>
+                </View>
+                <View style={s.divider} />
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Text style={s.cardLabel}>PAYMENT METHOD</Text>
+                  <View style={s.greenBadge}>
+                    <Text style={s.greenBadgeText}>{payMethodLabel}</Text>
+                  </View>
+                </View>
+              </View>
+              <View style={s.statRow}>
+                <View style={s.statBox}><Text style={s.statLabel}>ETA</Text><Text style={s.statValue}>{selectedRide.eta_min != null ? `${selectedRide.eta_min} min` : '—'}</Text></View>
+                <View style={s.statBox}><Text style={s.statLabel}>Distance</Text><Text style={s.statValue}>{selectedRide.distance_mi != null ? `${selectedRide.distance_mi} mi` : '—'}</Text></View>
+              </View>
+              {selectedRide.passenger_note ? (
+                <View style={{ backgroundColor: '#FEF3C7', borderRadius: 8, padding: 10, marginBottom: 12 }}>
+                  <Text style={{ fontSize: 12, color: '#92400E', fontWeight: '600', marginBottom: 2 }}>📝 Note from passenger</Text>
+                  <Text style={{ fontSize: 13, color: '#78350F' }}>{selectedRide.passenger_note}</Text>
+                </View>
+              ) : null}
+              {!showPayConfirm ? (
+                <TouchableOpacity style={s.redBtn} onPress={handleComplete} disabled={loading}>
+                  <Text style={s.redBtnText}>Complete Trip</Text>
+                </TouchableOpacity>
+              ) : (
+                <View style={[s.card, { backgroundColor: '#fdf6ec', borderColor: AMBER }]}>
+                  <Text style={[s.driverName, { marginBottom: 4 }]}>Did the passenger pay?</Text>
+                  <Text style={[s.muted, { marginBottom: 12 }]}>
+                    {selectedRide.payment_method === 'etransfer'
+                      ? 'Confirm you received the e-transfer.'
+                      : 'Confirm you received cash.'}
+                  </Text>
+                  <TouchableOpacity
+                    style={[s.redBtn, { backgroundColor: GREEN, opacity: loading ? 0.6 : 1 }]}
+                    onPress={() => confirmPayment('paid')}
+                    disabled={loading}
+                  >
+                    {loading
+                      ? <ActivityIndicator color="white" />
+                      : <Text style={s.redBtnText}>Yes, Paid ✓</Text>}
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[s.outlineBtn, { borderColor: RED, marginTop: 8, opacity: loading ? 0.6 : 1 }]}
+                    onPress={() => confirmPayment('disputed')}
+                    disabled={loading}
+                  >
+                    <Text style={[s.outlineBtnText, { color: RED }]}>Not Paid — Mark Disputed</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={{ alignItems: 'center', marginTop: 10 }}
+                    onPress={() => setShowPayConfirm(false)}
+                  >
+                    <Text style={s.muted}>← Go back</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </>
           )}
         </ScrollView>
         <BottomNav active="Trips" navigate={navigate} mode="driver" />
@@ -3121,7 +3277,7 @@ function ChatScreen({ navigate }: NavProp) {
     ? (liveRide?.passenger_id ?? selectedRide?.passenger_id ?? null)
     : (liveRide?.driver_id ?? null);
 
-  const { messages, loading } = useChatMessages(activeRideId);
+  const { messages, loading, sendOptimistic } = useChatMessages(activeRideId);
   const [myId, setMyId] = useState<string | null>(null);
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
@@ -3155,7 +3311,7 @@ function ChatScreen({ navigate }: NavProp) {
     const body = text.trim();
     if (!body || !activeRideId || !recipientId) return;
     setText('');
-    safeSend(() => sendTextMessage(activeRideId, recipientId, body));
+    safeSend(() => sendOptimistic(recipientId, body));
   };
 
   const sendQuick = (label: string) => {
@@ -3269,7 +3425,13 @@ function ChatScreen({ navigate }: NavProp) {
 
         {/* Input bar */}
         <View style={s.chatInputBar}>
-          <TouchableOpacity style={s.chatInputIcon} onPress={sendLocation} disabled={sending}>
+          <TouchableOpacity
+            style={s.chatInputIcon}
+            onPress={sendLocation}
+            disabled={sending}
+            accessibilityRole="button"
+            accessibilityLabel="Share location"
+          >
             <Ionicons name="location" size={22} color={RED} />
           </TouchableOpacity>
           <TextInput
@@ -3281,11 +3443,15 @@ function ChatScreen({ navigate }: NavProp) {
             onSubmitEditing={sendText}
             returnKeyType="send"
             multiline={false}
+            accessibilityLabel="Chat message"
           />
           <TouchableOpacity
             style={[s.chatSendBtn, (!text.trim() || sending) && { opacity: 0.4 }]}
             onPress={sendText}
             disabled={!text.trim() || sending}
+            accessibilityRole="button"
+            accessibilityLabel="Send message"
+            accessibilityState={{ disabled: !text.trim() || sending }}
           >
             <Ionicons name="send" size={18} color="white" />
           </TouchableOpacity>
@@ -3364,6 +3530,10 @@ function RateTripScreen({ navigate }: NavProp) {
                 key={n}
                 onPress={() => { haptic.select(); setStars(n); }}
                 hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+                accessibilityRole="button"
+                accessibilityLabel={`${n} star${n > 1 ? 's' : ''}`}
+                accessibilityState={{ selected: n === stars }}
+                style={{ minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' }}
               >
                 <Text style={s.starIcon}>{n <= stars ? '⭐' : '☆'}</Text>
               </TouchableOpacity>
@@ -3892,7 +4062,12 @@ function ProfileScreen({ navigate }: NavProp) {
                     </TouchableOpacity>
                   </View>
                 ) : (
-                  <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }} onPress={startEditName}>
+                  <TouchableOpacity
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 44, paddingVertical: 4 }}
+                    onPress={startEditName}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Edit name, currently ${profile?.full_name ?? 'not set'}`}
+                  >
                     <Text style={s.driverName}>{profile?.full_name ?? '—'}</Text>
                     <Ionicons name="pencil" size={12} color="#aaa" />
                   </TouchableOpacity>
@@ -4070,10 +4245,12 @@ function ProfileScreen({ navigate }: NavProp) {
                 key={label}
                 style={[
                   s.rowBetween,
-                  { paddingVertical: 12 },
+                  { paddingVertical: 12, minHeight: 44 },
                   i < arr.length - 1 && { borderBottomWidth: 0.5, borderColor: '#eee' },
                 ]}
                 onPress={() => Linking.openURL(url)}
+                accessibilityRole="link"
+                accessibilityLabel={label}
               >
                 <Text style={{ fontSize: 14, color: '#111' }}>{label}</Text>
                 <Ionicons name="open-outline" size={16} color="#aaa" />
@@ -4339,6 +4516,9 @@ function DriverVerificationScreen({ navigate }: NavProp) {
                   style={s.kycDocRow}
                   onPress={() => handleRowPress(type)}
                   disabled={isUploading}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${label} — ${doc ? doc.status : 'not uploaded'}. Tap to upload.`}
+                  accessibilityState={{ disabled: isUploading }}
                 >
                   <View style={s.kycDocIcon}>
                     <Text style={{ fontSize: 20 }}>{icon}</Text>
@@ -5364,7 +5544,7 @@ export default function App() {
   return (
     <StripeProvider
       publishableKey={process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY ?? ''}
-      merchantIdentifier="merchant.com.atee.rideshare"
+      merchantIdentifier="merchant.com.rideatee.app"
     >
     <BannerHost>
       <ScheduledRideReminderSidecar />

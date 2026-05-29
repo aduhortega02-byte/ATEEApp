@@ -1,49 +1,41 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchMyProfile } from '../lib/profile';
 import { supabase } from '../lib/supabase';
-import type { Profile } from '../lib/types';
+import { QK, CACHE_TTL } from '../lib/queryClient';
 
 export function useMyProfile() {
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
 
-  const refresh = useCallback(async () => {
-    try {
-      const p = await fetchMyProfile();
-      setProfile(p);
-    } catch (e) {
-      console.warn('[useMyProfile] refresh failed', e);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const { data: profile, isLoading: loading, refetch } = useQuery({
+    queryKey: QK.myProfile,
+    queryFn: fetchMyProfile,
+    staleTime: CACHE_TTL.profile,
+  });
 
+  // Realtime: invalidate cache when the user's profile row is updated.
   useEffect(() => {
     let userId: string | null = null;
-    let cancelled = false;
 
-    (async () => {
-      const { data } = await supabase.auth.getUser();
+    supabase.auth.getUser().then(({ data }) => {
       userId = data.user?.id ?? null;
-      if (!cancelled) await refresh();
-    })();
+    });
 
     const channel = supabase
-      .channel('my-profile')
+      .channel('my-profile-rq')
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'profiles' },
-        (payload: { new: any; old: any; eventType: string }) => {
-          if (userId && payload.new?.id === userId) refresh();
+        (payload: { new: any }) => {
+          if (userId && payload.new?.id === userId) {
+            queryClient.invalidateQueries({ queryKey: QK.myProfile });
+          }
         },
       )
       .subscribe();
 
-    return () => {
-      cancelled = true;
-      supabase.removeChannel(channel);
-    };
-  }, [refresh]);
+    return () => { supabase.removeChannel(channel); };
+  }, [queryClient]);
 
-  return { profile, loading, refresh };
+  return { profile: profile ?? null, loading, refresh: refetch };
 }

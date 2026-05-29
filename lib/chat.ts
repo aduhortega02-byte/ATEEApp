@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { notifyUser } from './notifications';
+import { sanitizeChatMessage } from './sanitize';
 
 export type ChatMessageType = 'text' | 'location' | 'quick_reply';
 
@@ -23,13 +24,15 @@ export async function sendTextMessage(
 ): Promise<ChatMessage> {
   const { data: u } = await supabase.auth.getUser();
   if (!u.user) throw new Error('Not authenticated');
+  const clean = sanitizeChatMessage(body);
+  if (!clean) throw new Error('Message cannot be empty');
   const { data, error } = await supabase
     .from('chat_messages')
-    .insert({ ride_id: rideId, sender_id: u.user.id, recipient_id: recipientId, type: 'text', body })
+    .insert({ ride_id: rideId, sender_id: u.user.id, recipient_id: recipientId, type: 'text', body: clean })
     .select()
     .single();
   if (error) throw error;
-  notifyUser(recipientId, 'New message', body.length > 80 ? body.slice(0, 77) + '…' : body);
+  notifyUser(recipientId, 'New message', clean.length > 80 ? clean.slice(0, 77) + '…' : clean);
   return data as ChatMessage;
 }
 

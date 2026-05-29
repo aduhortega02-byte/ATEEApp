@@ -16,6 +16,7 @@ import {
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { applyReferralCode } from '../lib/referrals';
+import { validateEmail, validatePassword, validateFullName, sanitizeReferralCode } from '../lib/sanitize';
 
 const RED = '#8B0000';
 
@@ -81,23 +82,37 @@ export default function AuthScreen({ onSignedIn }: Props) {
       setError('Please agree to the Terms of Service and Privacy Policy to continue.');
       return;
     }
+
+    // Client-side validation
+    const emailErr = validateEmail(email);
+    if (emailErr) { setError(emailErr); return; }
+    const passwordErr = validatePassword(password);
+    if (passwordErr) { setError(passwordErr); return; }
+    if (mode === 'signup') {
+      const nameErr = validateFullName(fullName);
+      if (nameErr) { setError(nameErr); return; }
+    }
+
     setError(null);
     setLoading(true);
     try {
       if (mode === 'signup') {
         const { error: err } = await supabase.auth.signUp({
-          email,
+          email: email.trim().toLowerCase(),
           password,
-          options: { data: { full_name: fullName, role } },
+          options: { data: { full_name: fullName.trim(), role } },
         });
         if (err) throw err;
-        if (referralCode.trim()) {
+        const code = sanitizeReferralCode(referralCode);
+        if (code) {
           // The DB trigger that creates the profile row is async; wait briefly before applying
-          const code = referralCode.trim();
           setTimeout(() => applyReferralCode(code).catch(() => {}), 1500);
         }
       } else {
-        const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+        const { error: err } = await supabase.auth.signInWithPassword({
+          email: email.trim().toLowerCase(),
+          password,
+        });
         if (err) throw err;
       }
       onSignedIn();
@@ -128,6 +143,9 @@ export default function AuthScreen({ onSignedIn }: Props) {
                 <TouchableOpacity
                   style={[s.toggleBtn, mode === 'signin' && s.toggleActive]}
                   onPress={() => switchMode('signin')}
+                  accessibilityRole="button"
+                  accessibilityLabel="Sign In"
+                  accessibilityState={{ selected: mode === 'signin' }}
                 >
                   <Text style={[s.toggleText, mode === 'signin' && s.toggleTextActive]}>
                     Sign In
@@ -136,6 +154,9 @@ export default function AuthScreen({ onSignedIn }: Props) {
                 <TouchableOpacity
                   style={[s.toggleBtn, mode === 'signup' && s.toggleActive]}
                   onPress={() => switchMode('signup')}
+                  accessibilityRole="button"
+                  accessibilityLabel="Sign Up"
+                  accessibilityState={{ selected: mode === 'signup' }}
                 >
                   <Text style={[s.toggleText, mode === 'signup' && s.toggleTextActive]}>
                     Sign Up
@@ -153,6 +174,7 @@ export default function AuthScreen({ onSignedIn }: Props) {
                     value={fullName}
                     onChangeText={setFullName}
                     autoCapitalize="words"
+                    accessibilityLabel="Full name"
                   />
 
                   <Text style={s.label}>I AM A</Text>
@@ -160,6 +182,9 @@ export default function AuthScreen({ onSignedIn }: Props) {
                     <TouchableOpacity
                       style={[s.roleBtn, role === 'passenger' && s.roleBtnActive]}
                       onPress={() => setRole('passenger')}
+                      accessibilityRole="button"
+                      accessibilityLabel="Passenger"
+                      accessibilityState={{ selected: role === 'passenger' }}
                     >
                       <Text style={[s.roleBtnText, role === 'passenger' && s.roleBtnTextActive]}>
                         🚶 Passenger
@@ -168,6 +193,9 @@ export default function AuthScreen({ onSignedIn }: Props) {
                     <TouchableOpacity
                       style={[s.roleBtn, role === 'driver' && s.roleBtnActive]}
                       onPress={() => setRole('driver')}
+                      accessibilityRole="button"
+                      accessibilityLabel="Driver"
+                      accessibilityState={{ selected: role === 'driver' }}
                     >
                       <Text style={[s.roleBtnText, role === 'driver' && s.roleBtnTextActive]}>
                         🚗 Driver
@@ -184,6 +212,7 @@ export default function AuthScreen({ onSignedIn }: Props) {
                     onChangeText={(t) => setReferralCode(t.toUpperCase())}
                     autoCapitalize="characters"
                     autoCorrect={false}
+                    accessibilityLabel="Referral code, optional"
                   />
                 </>
               )}
@@ -198,6 +227,8 @@ export default function AuthScreen({ onSignedIn }: Props) {
                 keyboardType="email-address"
                 autoCapitalize="none"
                 autoCorrect={false}
+                accessibilityLabel="Email address"
+                textContentType="emailAddress"
               />
 
               <Text style={s.label}>PASSWORD</Text>
@@ -208,13 +239,18 @@ export default function AuthScreen({ onSignedIn }: Props) {
                 value={password}
                 onChangeText={setPassword}
                 secureTextEntry
+                accessibilityLabel="Password"
+                textContentType={mode === 'signup' ? 'newPassword' : 'password'}
               />
 
               {mode === 'signin' && (
                 <TouchableOpacity
-                  style={{ alignSelf: 'flex-end', marginTop: 6 }}
+                  style={{ alignSelf: 'flex-end', marginTop: 6, minHeight: 44, justifyContent: 'center' }}
                   onPress={handleForgotPassword}
                   disabled={resetLoading}
+                  accessibilityRole="button"
+                  accessibilityLabel="Forgot password"
+                  hitSlop={{ top: 8, bottom: 8, left: 16, right: 8 }}
                 >
                   <Text style={{ fontSize: 12, color: '#c0392b' }}>
                     {resetLoading ? 'Sending…' : 'Forgot password?'}
@@ -227,6 +263,9 @@ export default function AuthScreen({ onSignedIn }: Props) {
                   style={s.termsRow}
                   onPress={() => setAgreedToTerms((v) => !v)}
                   activeOpacity={0.7}
+                  accessibilityRole="checkbox"
+                  accessibilityLabel="I agree to the Terms of Service and Privacy Policy"
+                  accessibilityState={{ checked: agreedToTerms }}
                 >
                   <View style={[s.checkbox, agreedToTerms && s.checkboxChecked]}>
                     {agreedToTerms && <Text style={s.checkmark}>✓</Text>}
@@ -236,6 +275,8 @@ export default function AuthScreen({ onSignedIn }: Props) {
                     <Text
                       style={s.termsLink}
                       onPress={() => Linking.openURL('https://rideatee.com/terms-of-service')}
+                      accessibilityRole="link"
+                      accessibilityLabel="Terms of Service"
                     >
                       Terms of Service
                     </Text>
@@ -243,6 +284,8 @@ export default function AuthScreen({ onSignedIn }: Props) {
                     <Text
                       style={s.termsLink}
                       onPress={() => Linking.openURL('https://rideatee.com/privacy-policy')}
+                      accessibilityRole="link"
+                      accessibilityLabel="Privacy Policy"
                     >
                       Privacy Policy
                     </Text>
@@ -250,12 +293,15 @@ export default function AuthScreen({ onSignedIn }: Props) {
                 </TouchableOpacity>
               )}
 
-              {error ? <Text style={s.error}>{error}</Text> : null}
+              {error ? <Text style={s.error} accessibilityLiveRegion="polite">{error}</Text> : null}
 
               <TouchableOpacity
                 style={[s.submitBtn, loading && { opacity: 0.6 }]}
                 onPress={submit}
                 disabled={loading}
+                accessibilityRole="button"
+                accessibilityLabel={mode === 'signin' ? 'Sign in' : 'Create account'}
+                accessibilityState={{ disabled: loading }}
               >
                 {loading ? (
                   <ActivityIndicator color="white" />
